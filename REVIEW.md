@@ -663,3 +663,67 @@ Yes, and this pass makes that verifiable rather than assumed:
 |-------|-------|-----|--------|
 | EVDCTR | 1 558 823 B (9 %) | 115 284 B (35 %) | chk3 0, chk5 0 |
 | EVDSTR | 1 276 351 B (7 %) | 85 532 B (26 %) | chk3 0, chk5 0 |
+
+## 13. The restart loop - what the log in log.txt proves
+
+The serial capture shows three resets in a row with nothing between them:
+
+```
+ESP-ROM:esp32s3-20210327
+rst:0x10 (RTCWDT_RTC_RST),boot:0x8 (SPI_FAST_FLASH_BOOT)
+mode:DOUT, clock div:1
+load:0x3fce2820,len:0xfb0
+load:0x403c8700,len:0xaf4
+load:0x403cb700,len:0x2e24
+entry 0x403c8898
+```
+
+### What it says
+
+| Line | Reading |
+|------|---------|
+| `rst:0x10 RTCWDT_RTC_RST` | The **RTC watchdog** fired. This is not a panic, not a brown-out and not the task watchdog - something stopped the chip dead (interrupts off, a cache disabled, or a tight loop with the scheduler starved) long enough for the RTC WDT to reset it. |
+| `boot:0x8 SPI_FAST_FLASH_BOOT` | The ROM loader found a **valid bootloader and app**. The image is not missing or corrupt. |
+| `mode:DOUT` | The bootloader runs the flash in **DOUT** (the ROM's safe default), so it has not read the header yet at the point of the last reset. |
+| `entry 0x403c8898` | Control reached the **second-stage bootloader**. |
+| Nothing after it | The reset happens inside the second-stage bootloader or in the first moments of the app - **before any `Serial.printf` in `setup()` could run**. |
+
+That last row is the important one: my new banner never printed, so this is not
+a bug in `setup()` that a better log would name. The chip dies before the app
+gets a word out.
+
+### What was wrong with the firmware regardless
+
+Even though the loop is below the app, three things in the code were wrong and
+are now fixed, because each of them is a real defect on its own:
+
+| # | Where | Defect |
+|---|-------|--------|
+| 13.1 | both `EVDMain.h` | **The boot log could not survive a crash.** Nothing recorded how far `setup()` had got. Now `RTC_NOINIT_ATTR gBootMarker` is set at the top and cleared at the end; the next boot prints `LAST BOOT DID NOT FINISH` and the last `[STEP]` line names the subsystem it died in. |
+| 13.2 | both `EVDMain.h` | **`[STEP]` markers** before every risky subsystem: http, dlna, receiver link, i2s, usb lifecycle, queues/tasks (CTR) and discovery, udp, http, queues/tasks (STR). A hang now names itself. |
+| 13.3 | `EVDCTR/EVDUsb.h`, `EVDMain.h` | **`EspUsbDevice::begin()` could block the HTTP task forever** with no trace: no dashboard, no `/api/state`, nothing to recover with. `gUsbStarting`/`gUsbStartBeganMs` now bracket it and `loop()` prints a `[USB] WARNING: ... begin() stuck for N ms` line after 8 s. |
+| 13.4 | both `EVDMain.h` | Chip accessors (`ESP.getFreeHeap()`, `getFreePsram()`, `getFlashChipSize()`, `getSketchSize()`) were called before anything else in `setup()`; they go through the chip-debug-report path. They are now reported **after** the tasks exist, as one `[BOOT] resources` line, which is also the more useful number. |
+
+### What to check on the hardware
+
+The reset is below the app, so the cause is one of these, in order of
+likelihood:
+
+1. **USB-Serial-JTAG vs the USB port.** `CDCOnBoot=cdc` + `USBMode=default`
+   routes `Serial` to the **native USB** port. A board whose "USB" socket is
+   wired to a **CH340/CP210x UART bridge** will show the ROM output (the ROM
+   writes to UART0 before USB exists) and then appear to stop - and if the
+   bridge's DTR/RTS is left asserting reset, it resets in a loop exactly like
+   this. Try the other socket on the board, or flash with `USBMode=hwcdc`.
+2. **Power.** `RTCWDT_RTC_RST` is also what a collapsing rail looks like when
+   the brown-out detector is too slow to catch it. A USB hub or a thin cable
+   that sags when the radio starts is the usual culprit. Try a powered port.
+3. **PSRAM mode.** `PSRAM=opi` is correct for an N16R8 module; an N8R2 or a
+   module without PSRAM restarts in the bootloader with this exact signature.
+4. **Flash mode.** `mode:DOUT` in the ROM line is normal, but a module that
+   needs `dio`/`qio` to be set explicitly can loop here. Reflash with
+   `esptool.py --flash-mode dio` and see whether it gets past.
+
+If the new image still resets before the banner, the answer is in the boot
+mode string (`boot:0x8` is normal flash boot; anything else names the strap
+pins that are wrong) and in whether the ROM output appears on **both** sockets.

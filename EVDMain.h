@@ -18,6 +18,22 @@ inline void printBootBanner(const char *phase) {
   Serial.printf("+------------------------------------------------------+\n");
 }
 
+// ---- Boot progress marker ---------------------------------------------
+// RTC memory survives a reset but not a power cycle. The previous boot clears
+// it at the end of setup(); finding it set means the last run never finished,
+// and the last [STEP] line printed names the subsystem it died in.
+RTC_NOINIT_ATTR static uint32_t gBootMarker;
+static const uint32_t BOOT_MARKER_LIVE   = 0x45564431u;   // "EVD1"
+static const uint32_t BOOT_MARKER_FINISH = 0x45564432u;   // "EVD2"
+static bool gLastBootWasCrash = false;
+
+inline void initBootMarker() {
+  gLastBootWasCrash = (gBootMarker == BOOT_MARKER_LIVE);
+  gBootMarker = BOOT_MARKER_LIVE;
+}
+
+inline void markBootComplete() { gBootMarker = BOOT_MARKER_FINISH; }
+
 inline const char *resetReasonStr(esp_reset_reason_t r) {
   switch (r) {
     case ESP_RST_POWERON:   return "POWERON (cold boot)";
@@ -37,9 +53,15 @@ inline void setup_serial() {
   Serial.begin(LOG_BAUD);
   delay(300);
 
+  initBootMarker();
   printBootBanner("booting");
   Serial.printf("[BOOT] firmware      : EVDSTR %s\n", EVD_FW_VERSION);
   Serial.printf("[BOOT] reset reason  : %s\n", resetReasonStr(esp_reset_reason()));
+  if (gLastBootWasCrash) {
+    Serial.printf("[BOOT] LAST BOOT DID NOT FINISH - the previous run never "
+                  "reached the end of setup(). The last [STEP] printed is "
+                  "where it died.\n");
+  }
   Serial.printf("[BOOT] chip          : %s rev %d, %d MHz, %d core(s)\n",
                 ESP.getChipModel(), (int)ESP.getChipRevision(),
                 (int)getCpuFrequencyMhz(), (int)ESP.getChipCores());
@@ -176,13 +198,26 @@ void setup() {
          PIN_LINK_SCLK, PIN_LINK_MOSI, PIN_LINK_IRQ, PIN_LINK_CS);
   }
 
+  Serial.printf("[STEP] discovery responder\n");
   setupDiscoveryResponder();
+  Serial.printf("[STEP] udp transport\n");
   setup_udp_transport();
+  Serial.printf("[STEP] http server\n");
   setup_http_server();
+  Serial.printf("[STEP] queues and tasks\n");
   setup_queues_and_tasks();
+  Serial.printf("[STEP] tasks started\n");
 
   logLinkPeerState("boot");
   printBootBanner("boot complete");
+  gLastBootWasCrash = false;
+  markBootComplete();
+  Serial.printf("[BOOT] resources     : heap %u KB free, psram %u KB free, "
+                "sketch %u KB of %u KB\n",
+                (unsigned)(ESP.getFreeHeap() / 1024),
+                (unsigned)(ESP.getFreePsram() / 1024),
+                (unsigned)(ESP.getSketchSize() / 1024),
+                (unsigned)(ESP.getFreeSketchSpace() / 1024));
   Serial.printf("[BOOT] reach me at  : http://%s/  (pair EVDCTR on the Stream tab)\n",
                 accessPointActive ? WiFi.softAPIP().toString().c_str()
                                   : WiFi.localIP().toString().c_str());
