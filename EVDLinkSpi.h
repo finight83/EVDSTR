@@ -96,6 +96,18 @@ inline bool setupLinkSpi() {
   return true;
 }
 
+// One line that answers "is EVDCTR there?", at boot and on demand. EVDCTR
+// drives IRQ high for the duration of a frame, so a level sampled here says
+// whether the partner is alive and wired - and the pull-down means a missing
+// or unpowered partner reads LOW rather than floating.
+inline void logLinkPeerState(const char *when) {
+  int irq = gpio_get_level((gpio_num_t)PIN_LINK_IRQ);
+  Serial.printf("[LINK] %s: IRQ(GPIO%d) %s - %s\n", when, PIN_LINK_IRQ,
+                irq ? "HIGH" : "LOW",
+                irq ? "EVDCTR is driving it (partner present)"
+                    : "no partner signal yet (EVDCTR off, unwired, or silent)");
+}
+
 // ---- Frame receive ----------------------------------------------------------
 // Waits up to `waitUs` for the producer's IRQ edge. Returns true when a
 // complete, valid frame was clocked into `payloadOut`. On false, nothing was

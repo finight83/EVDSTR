@@ -145,6 +145,8 @@ inline void setup_queues_and_tasks() {
   LOGI("Creating queues and tasks...");
   opusQueue = xQueueCreate(OPUS_QUEUE_LEN, sizeof(OpusPacket));
   if (!opusQueue) {
+    Serial.printf("[TASK] opusQueue creation FAILED (free heap %u B) - "
+                  "no audio will flow\n", (unsigned)ESP.getFreeHeap());
     LOGE("opusQueue creation failed");
     return;
   }
@@ -152,21 +154,27 @@ inline void setup_queues_and_tasks() {
   BaseType_t rc;
   rc = xTaskCreatePinnedToCore(audioLinkTask, "audioLink", 4096, nullptr, 6,
                                nullptr, 0);
-  if (rc != pdPASS) LOGE("FAILED to create audioLinkTask (%d)", (int)rc);
+  if (rc != pdPASS) { LOGE("FAILED to create audioLinkTask (%d)", (int)rc);
+                      Serial.printf("[TASK] audioLink FAILED (%d)\n", (int)rc); }
 
   rc = xTaskCreatePinnedToCore(udpSendTask, "udpSend", 8192, nullptr, 3,
                                nullptr, 0);
-  if (rc != pdPASS) LOGE("FAILED to create udpSendTask (%d)", (int)rc);
+  if (rc != pdPASS) { LOGE("FAILED to create udpSendTask (%d)", (int)rc);
+                      Serial.printf("[TASK] udpSend  FAILED (%d)\n", (int)rc); }
 
   rc = xTaskCreatePinnedToCore(playerTask, "players", 8192, nullptr, 3,
                                nullptr, 1);
-  if (rc != pdPASS) LOGE("FAILED to create playerTask (%d)", (int)rc);
+  if (rc != pdPASS) { LOGE("FAILED to create playerTask (%d)", (int)rc);
+                      Serial.printf("[TASK] players  FAILED (%d)\n", (int)rc); }
 
   // The encoder mirror is an HTTP client, not audio: it lives on core 0 at a
   // low priority so a slow EVDCTR can never delay the link or the pacer.
   rc = xTaskCreatePinnedToCore(encoderMirrorTask, "mirror", 4096, nullptr, 1,
                                nullptr, 0);
-  if (rc != pdPASS) LOGE("FAILED to create encoderMirrorTask (%d)", (int)rc);
+  if (rc != pdPASS) { LOGE("FAILED to create encoderMirrorTask (%d)", (int)rc);
+                      Serial.printf("[TASK] mirror   FAILED (%d)\n", (int)rc); }
 
+  Serial.printf("[TASK] core 0: audioLink(p6) udpSend(p3) mirror(p1) | "
+                "core 1: players(p3)\n");
   LOGI("Task layout: core 0 = link in + UDP pacer + mirror, core 1 = players");
 }

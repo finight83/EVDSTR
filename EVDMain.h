@@ -5,23 +5,59 @@
 // ============================================================================
 #include <esp_system.h>
 
+// ---- Boot banner -----------------------------------------------------------
+// Same shape as EVDCTR's, so a two-board bring-up reads as one log: which
+// board, which firmware, why it rebooted, how the radio came up, and the
+// compile-time constants a stale binary would get wrong. Serial.printf and not
+// LOGI, because this runs before gSerialLogLevel means anything.
+inline void printBootBanner(const char *phase) {
+  Serial.printf("\n");
+  Serial.printf("+------------------------------------------------------+\n");
+  Serial.printf("|  EVDSTR  %-10s  stream / players half           |\n", EVD_FW_VERSION);
+  Serial.printf("|  %-50s|\n", phase);
+  Serial.printf("+------------------------------------------------------+\n");
+}
+
+inline const char *resetReasonStr(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "POWERON (cold boot)";
+    case ESP_RST_SW:        return "SOFTWARE (esp_restart)";
+    case ESP_RST_PANIC:     return "PANIC (exception - see backtrace above)";
+    case ESP_RST_INT_WDT:   return "INT_WDT (interrupt watchdog)";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT (a task blocked too long)";
+    case ESP_RST_WDT:       return "WDT (other watchdog)";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP wake";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (power supply too weak)";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "UNKNOWN";
+  }
+}
+
 inline void setup_serial() {
   Serial.begin(LOG_BAUD);
   delay(300);
-  LOGI("========================================================");
-  LOGI("EVDSTR %s - streaming half of the split server", EVD_FW_VERSION);
-  LOGI("========================================================");
-  esp_reset_reason_t reason = esp_reset_reason();
-  const char *why = "UNKNOWN";
-  switch (reason) {
-    case ESP_RST_POWERON:  why = "POWERON";  break;
-    case ESP_RST_SW:       why = "SOFTWARE"; break;
-    case ESP_RST_PANIC:    why = "PANIC";    break;
-    case ESP_RST_TASK_WDT: why = "TASK_WDT"; break;
-    case ESP_RST_BROWNOUT: why = "BROWNOUT"; break;
-    default: break;
-  }
-  LOGI("reset reason: %s", why);
+
+  printBootBanner("booting");
+  Serial.printf("[BOOT] firmware      : EVDSTR %s\n", EVD_FW_VERSION);
+  Serial.printf("[BOOT] reset reason  : %s\n", resetReasonStr(esp_reset_reason()));
+  Serial.printf("[BOOT] chip          : %s rev %d, %d MHz, %d core(s)\n",
+                ESP.getChipModel(), (int)ESP.getChipRevision(),
+                (int)getCpuFrequencyMhz(), (int)ESP.getChipCores());
+  Serial.printf("[BOOT] flash         : %u MB, sketch %u KB\n",
+                (unsigned)(ESP.getFlashChipSize() / (1024 * 1024)),
+                (unsigned)(ESP.getSketchSize() / 1024));
+  Serial.printf("[BOOT] psram         : %u KB free\n",
+                (unsigned)(ESP.getFreePsram() / 1024));
+  Serial.printf("[BOOT] free heap     : %u KB\n", (unsigned)(ESP.getFreeHeap() / 1024));
+  Serial.printf("[BOOT] dashboard     : %u B gzip (EVDSTRCTRL.h via gen_gz.py)\n",
+                (unsigned)EVDSTRCTRL_GZ_LEN);
+  Serial.printf("[BOOT] audio in      : UDP %d out, %u Hz opus, %d ms frames\n",
+                AUDIO_UDP_PORT, (unsigned)OPUS_SAMPLE_RATE_DEFAULT, OPUS_FRAME_MS);
+  Serial.printf("[BOOT] pin link      : SCLK %d MOSI %d IRQ %d CS %d (slave)\n",
+                PIN_LINK_SCLK, PIN_LINK_MOSI, PIN_LINK_IRQ, PIN_LINK_CS);
+  Serial.printf("[BOOT] discovery     : UDP %d, probe every %d ms while unpaired\n",
+                DISCOVERY_PORT, DISCOVERY_TX_MS);
+  Serial.printf("\n");
 }
 
 inline void createSyncPrimitives() {
@@ -90,7 +126,45 @@ void setup() {
   loadZonesFromNVS();
 
   loadWiFiSettings();
+  if (wifiSsid.length() && !wifiPassword.length()) {
+    // A saved SSID with no password is almost always a password that was
+    // cleared by a failed save, not an open network. Say so: this is the most
+    // common reason a board falls back to its AP while the operator believes
+    // it is configured.
+    Serial.printf("[BOOT] NOTE          : ssid '%s' has NO password saved - "
+                  "if that network is protected, the join will fail and this "
+                  "board will open its own AP\n", wifiSsid.c_str());
+  }
+  Serial.printf("[BOOT] stored config : name '%s', ssid '%s', ctr '%s'\n",
+                serverName.c_str(),
+                wifiSsid.length() ? wifiSsid.c_str() : "(none - AP fallback)",
+                ctrHost.length() ? ctrHost.c_str() : "(unpaired - searching)");
+
+  // The radio before the audio pipeline and the HTTP server: this is the line
+  // that answers "why can I not see it", and it must not be behind anything
+  // that can fail.
+  Serial.printf("[BOOT] wifi          : bringing up (timeout %d ms)\n",
+                WIFI_CONNECT_TIMEOUT_MS);
   setup_wifi_sta();
+  if (accessPointActive) {
+    Serial.printf("[BOOT] wifi          : AP FALLBACK '%s' at http://%s/\n",
+                  WiFi.softAPSSID().c_str(), WiFi.softAPIP().toString().c_str());
+    if (!wifiSsid.length())
+      Serial.printf("[BOOT] reason        : no Wi-Fi credentials stored yet\n");
+    else
+      Serial.printf("[BOOT] reason        : could not join '%s' within %d ms "
+                    "(status %d) - wrong password, out of range, or 5 GHz only\n",
+                    wifiSsid.c_str(), WIFI_CONNECT_TIMEOUT_MS, (int)WiFi.status());
+    Serial.printf("[BOOT] next          : join '%s' (no password), open "
+                  "http://%s/ and enter your Wi-Fi\n",
+                  WiFi.softAPSSID().c_str(), WiFi.softAPIP().toString().c_str());
+  } else {
+    Serial.printf("[BOOT] wifi          : connected to '%s', ip %s, rssi %d dBm\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                  (int)WiFi.RSSI());
+    Serial.printf("[BOOT] dashboard     : http://%s/  or  http://%s.local/\n",
+                  WiFi.localIP().toString().c_str(), serverName.c_str());
+  }
   serverEpoch = esp_random();
 
   // Slave side of the pin link before the audio task exists, so the SPI
@@ -107,8 +181,13 @@ void setup() {
   setup_http_server();
   setup_queues_and_tasks();
 
-  LOGI("boot complete: http://%s/  (pair EVDCTR on the Stream tab)",
-       WiFi.localIP().toString().c_str());
+  logLinkPeerState("boot");
+  printBootBanner("boot complete");
+  Serial.printf("[BOOT] reach me at  : http://%s/  (pair EVDCTR on the Stream tab)\n",
+                accessPointActive ? WiFi.softAPIP().toString().c_str()
+                                  : WiFi.localIP().toString().c_str());
+  Serial.printf("[BOOT] steady state : errors only; raise the level with "
+                "GET /api/log/level?level=3 or the Log tab\n\n");
 }
 
 // ============================================================================
@@ -138,5 +217,25 @@ void loop() {
   // settings flush and clock sync; a blocking GET with a 1.5 s timeout every
   // 2 s (EVDCTR unreachable) stalled all three. The pull runs in its own task,
   // started in setup().
+
+  // ---- 10 s heartbeat ------------------------------------------------------
+  // One line that says whether this board is actually doing its job: frames
+  // arriving from EVDCTR over the pins, datagrams leaving over Wi-Fi, how many
+  // players are listening, and whether the pairing exists. Level 1 (steady
+  // state) on purpose - a box that is up but silent has to say so somewhere.
+  static unsigned long lastBeat = 0;
+  if (millis() - lastBeat > 10000) {
+    lastBeat = millis();
+    Serial.printf("[HB] up %lus | heap %uK | wifi %s %d dBm | ctr %s | "
+                  "link %lu ms gap | udp %lu | players %d\n",
+                  (unsigned long)(millis() / 1000),
+                  (unsigned)(ESP.getFreeHeap() / 1024),
+                  accessPointActive ? "AP" : WiFi.SSID().c_str(), (int)WiFi.RSSI(),
+                  ctrHost.length() ? ctrHost.c_str() : "(unpaired)",
+                  (unsigned long)statLinkGapMs,
+                  (unsigned long)statUdpSent, subscriberCount);
+    if (statLinkGapMs > 400) logLinkPeerState("heartbeat");
+  }
+
   delay(1);
 }

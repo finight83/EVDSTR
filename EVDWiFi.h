@@ -47,10 +47,23 @@ inline void startSetupAccessPoint() {
   String apName = sanitizeServerName(serverName);
   if (!apName.length()) apName = "EVDSTR";
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(apName.c_str(), strlen(default_ap_password) ? default_ap_password : nullptr);
+  bool ok = WiFi.softAP(apName.c_str(),
+                        strlen(default_ap_password) ? default_ap_password : nullptr);
   accessPointActive = true;
+  if (!ok) {
+    // No STA and no AP means nothing to open in a browser: say it loudly
+    // instead of reporting an access point that is not there.
+    LOGE("WiFi: softAP('%s') FAILED - no access point is up", apName.c_str());
+    Serial.printf("[WIFI] softAP FAILED for '%s'\n", apName.c_str());
+    return;
+  }
   LOGW("WiFi: AP fallback '%s' at %s", apName.c_str(),
        WiFi.softAPIP().toString().c_str());
+  // Unconditional: the line an operator reads when they cannot see the board.
+  Serial.printf("[WIFI] AP FALLBACK: ssid '%s', open (no password), "
+                "http://%s/  channel %d\n",
+                WiFi.softAPSSID().c_str(), WiFi.softAPIP().toString().c_str(),
+                (int)WiFi.channel());
 }
 
 inline void setup_wifi_sta() {

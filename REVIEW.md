@@ -619,3 +619,47 @@ go for the include order to work.
 Still hardware-only, unchanged from §9: the pin link between two real boards,
 Opus at runtime, USB enumeration, and discovery on a LAN that does not isolate
 clients.
+
+## 12. Fifth pass - a serial monitor that says what the board is doing
+
+The report was "I flashed EVDCTR and I do not see it as an AP". Nothing in the
+firmware said *why*: the boot log was six `LOGI` lines, they were filtered by
+a log level that had no meaning yet, and the one line that mattered - "AP
+fallback ... 192.168.4.1" - was a `LOGW` that also vanished once the level
+settled. A board with no Wi-Fi looked the same on serial as a board with no
+code in it.
+
+| # | Where | Change |
+|---|-------|--------|
+| 12.1 | both `EVDMain.h` | **Boot banner, printed with `Serial.printf`, never filtered.** Board, firmware version, reset reason in words, chip/flash/PSRAM/heap, dashboard gzip size, encoder constants, pin-link map, discovery port, and whether USB audio is actually compiled in. |
+| 12.2 | both `EVDMain.h` | **The radio reports itself before anything else can fail.** Stored name/SSID/pairing, then either `connected ... ip ... rssi` or `AP FALLBACK: ssid '...', open (no password), http://192.168.4.1/ channel N` **with the reason**: no credentials stored, or "could not join 'x' within 3000 ms (status N)". |
+| 12.3 | both `EVDWiFi.h` | `WiFi.softAP()` returning false was ignored - the board then had no STA and no AP and said nothing. Now logged as a failure on serial and in the log ring. |
+| 12.4 | both `EVDMain.h` | **A saved SSID with an empty password is called out at boot.** That is the usual reason a board the operator believes is configured opens its own AP. |
+| 12.5 | both `EVDMain.h` | **10 s heartbeat** at level 1: uptime, heap, Wi-Fi/AP + RSSI, source, encoder frames, link health and counters, pairing. A box that is up but doing nothing now says so once every ten seconds. |
+| 12.6 | both `EVDLinkSpi.h` | `logLinkPeerState()`: at boot and whenever the link is idle, prints the IRQ/CS levels and the frame counters, so "link IDLE" is not the first sign of a wiring fault. |
+| 12.7 | both `EVDAudio.h` | Every task/queue creation failure now prints which one failed and the free heap, plus the task->core layout once at boot. |
+| 12.8 | `EVDCTR/EVDAudio.h` | **`encProbeTask`**: with no EVDSTR attached, prints encoder frames per 5 s and whether the partner is clocking them. This is how a lone CTR proves its whole capture -> resample -> opus chain without a second board. |
+
+### Can each board boot on its own?
+
+Yes, and this pass makes that verifiable rather than assumed:
+
+- **EVDCTR alone**: no stored SSID -> opens AP `EVDCTR` at 192.168.4.1 (open,
+  no password) and serves the dashboard there. No EVDSTR -> discovery probes
+  every 3 s, pairing stays "(unpaired)", and `encProbeTask` reports the encoder
+  running and its frames being dropped. The pin link initialises as master with
+  nothing on the other end; `spi_bus_initialize` does not wait for a slave.
+- **EVDSTR alone**: same AP fallback (`EVDSTR`), dashboard on 192.168.4.1,
+  discovery probes every 3 s, players register and are served silence-free
+  (the pacer has nothing to send). Its link is a slave - it only clocks when
+  EVDCTR drives IRQ - so with no partner `audioLinkTask` blocks on its IRQ
+  wait and the heartbeat prints `link <gap> ms` with the GPIO levels.
+- Neither board blocks on the other at boot: no HTTP call, no SPI transfer and
+  no UDP handshake is on the `setup()` path.
+
+### Build after this pass
+
+| Board | Flash | RAM | Audits |
+|-------|-------|-----|--------|
+| EVDCTR | 1 558 823 B (9 %) | 115 284 B (35 %) | chk3 0, chk5 0 |
+| EVDSTR | 1 276 351 B (7 %) | 85 532 B (26 %) | chk3 0, chk5 0 |
