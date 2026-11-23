@@ -23,7 +23,11 @@ inline void handleOtaStatus(AsyncWebServerRequest *request) {
              ",\"applying\":" + (otaInProgress ? "true" : "false") +
              ",\"message\":\"" + jsonEscape(otaUploadMessage) + "\"" +
              ",\"version\":\"" EVD_FW_VERSION "\"}";
-  sendJson(request, j);
+  // sendJson() lives in EVDRoutes.h, which comes after this file: send it
+  // directly rather than reaching forward.
+  AsyncWebServerResponse *res = request->beginResponse(200, "application/json", j);
+  res->addHeader("Cache-Control", "no-store, max-age=0");
+  request->send(res);
 }
 
 inline void handleOtaUpload(AsyncWebServerRequest *request, String filename,

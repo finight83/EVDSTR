@@ -144,7 +144,7 @@ inline void refreshEncoderMirror() {
         }
         if (d["bufferMs"].is<int>()) audioBufferMs = (uint16_t)(int)d["bufferMs"];
         String sig = d["signal"] | "auto";
-        g_currentSignal = (sig == "music") ? 2 : (sig == "voice") ? 1 : -1000;
+        g_currentSignal = (sig == "music") ? 2 : (sig == "voice") ? 1 : OPUS_AUTO;
         String app = d["application"] | "audio";
         g_currentApplication = (app == "audio") ? 1 : (app == "voip") ? 0 : 2;
         ctrLastPullMs = millis();

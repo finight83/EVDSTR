@@ -78,6 +78,9 @@
 #include <freertos/semphr.h>
 #include <ArduinoJson.h>
 #include "EVDLink.h"
+// The dashboard is a PROGMEM gzip blob, generated from EVDSTRCTRL.h by
+// gen_gz.py. It must be visible to EVDRoutes.h, which serves it.
+#include "EVDSTRCTRL_GZ.h"
 
 // ---- Versioning ------------------------------------------------------------
 #ifndef EVD_FW_VERSION
@@ -110,6 +113,15 @@ const char *default_ap_password       = "";
 #define MAX_OPUS_PACKET_LEN 1024
 static_assert(MAX_OPUS_PACKET_LEN == LINK_MAX_PAYLOAD,
               "MAX_OPUS_PACKET_LEN must equal LINK_MAX_PAYLOAD");
+
+// The encoder constants the players are told about. EVDSTR never encodes; it
+// mirrors EVDCTR's values (EVDWiFi.h, refreshEncoderMirror) so a registration
+// or a ctrl push carries the truth. These must match libopus's own values
+// because they are sent to the players as-is.
+#define OPUS_AUTO                    -1000
+#define OPUS_APPLICATION_VOIP        2048
+#define OPUS_APPLICATION_AUDIO       2049
+#define OPUS_APPLICATION_RESTRICTED_LOWDELAY 2051
 
 // ---- Buffers ---------------------------------------------------------------
 // 16 slots = 320 ms of encoded audio in DRAM. The pacer drains at 50 Hz; the
@@ -217,7 +229,6 @@ inline void sendCtrlToSubscriber(const String &ip, const String &json);
 inline void sendAuthoritativeTimeSync();
 inline void handleClockSyncRequests();
 inline void pruneStaleSubscribers(unsigned long now);
-inline void pollNodeStats();
 inline void loadZonesFromNVS();
 inline void saveZonesToNVS();
 inline void broadcastNodeConfig();
@@ -228,6 +239,15 @@ inline std::vector<Zone> snapshotZones();
 inline std::vector<PlayerNode> snapshotPlayers(unsigned long now);
 inline void setupOtaRoutes();
 inline void handleApiState(AsyncWebServerRequest *request);
+inline bool setupLinkSpi();
+inline void refreshEncoderMirror();
+inline void serviceDiscovery();
+inline void handleRestart(AsyncWebServerRequest *request);
+// Defined later in the include chain (EVDAudio.h / EVDPlayers.h), but called
+// from headers that come before them.
+inline void audioLinkTask(void *param);
+inline void playerTask(void *param);
+inline void pollNodeStats();
 
 // ============================================================================
 //  Headers (order is load-bearing)
@@ -240,5 +260,6 @@ inline void handleApiState(AsyncWebServerRequest *request);
 #include "EVDUDP.h"
 #include "EVDAudio.h"
 #include "EVDPlayers.h"
+#include "EVDOTA.h"     // route handlers EVDRoutes.h registers
 #include "EVDRoutes.h"
 #include "EVDMain.h"

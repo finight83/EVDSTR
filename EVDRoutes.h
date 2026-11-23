@@ -6,8 +6,12 @@
 //  firmware changes. The dashboard is smaller: the Audio tab lives on EVDCTR.
 // ============================================================================
 #include <ESPAsyncWebServer.h>
-#include "EVDOTA.h"
 
+// EVDOTA.h is included by EVDSTR.ino before this file (it defines globals, so
+// including it twice would be a redefinition). These are its entry points.
+inline void setupOtaRoutes();
+
+// The single server instance for this board.
 AsyncWebServer server(80);
 
 inline void sendJson(AsyncWebServerRequest *r, const String &body) {
@@ -21,10 +25,8 @@ inline void sendJson(AsyncWebServerRequest *r, const String &body) {
 // expects: subscribers, queueDepth, queueTarget, pacerLateMs, framesSent,
 // framesDropped, rssi, heapFree, heapMinFree, upMs, ip, version.
 inline void handleApiState(AsyncWebServerRequest *request) {
-  portENTER_CRITICAL(&gStatsMux);
-    uint32_t qd = statQueueDepth;
-    uint32_t late = statPacerLateLastSec;
-  portEXIT_CRITICAL(&gStatsMux);
+  uint32_t qd   = statQueueDepth;      // 32-bit store, atomic on this core
+  uint32_t late = statPacerLateLastSec;
 
   int subs = 0;
   if (lockFor(subsMutex, 20)) { subs = subscriberCount; unlockFor(subsMutex); }
@@ -44,6 +46,12 @@ inline void handleApiState(AsyncWebServerRequest *request) {
   j += "\"linkIn\":" + String((unsigned long)statLinkIn) + ",";
   j += "\"linkGapMs\":" + String((unsigned long)statLinkGapMs) + ",";
   j += "\"opusSampleRate\":" + String((unsigned)g_opusSampleRate) + ",";
+  j += "\"opusFrameSamples\":" + String((unsigned)g_opusFrameSamples) + ",";
+  j += "\"channels\":" + String((unsigned)g_opusChannels) + ",";
+  j += "\"linkLastOkMs\":" + String((unsigned long)statLinkLastOkMs) + ",";
+  j += "\"linkStale\":" + String((unsigned long)statLinkStale) + ",";
+  j += "\"encBitrate\":" + String(g_currentBitrate) + ",";
+  j += "\"encComplexity\":" + String(currentOpusComplexity) + ",";
   j += "\"bufferMs\":" + String((unsigned)audioBufferMs) + ",";
   j += "\"volume\":" + String((int)masterVolume) + ",";
   j += "\"muted\":" + String(masterMuted ? "true" : "false") + ",";
@@ -171,10 +179,18 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
                   "{\"ok\":false,\"error\":\"EVDCTR not paired\"}");
     return;
   }
+  // The HTTP task is on core 0 with the pacer. A relay to a slow EVDCTR must
+  // not hold it, so the timeout is short and the same mutex the mirror pull
+  // uses keeps two relays from stacking up on one socket.
+  if (!lockFor(ctrPullMutex, 300)) {
+    request->send(503, "application/json", "{\"ok\":false,\"error\":\"relay busy\"}");
+    return;
+  }
   HTTPClient http;
-  http.setConnectTimeout(2000);
-  http.setTimeout(2000);
+  http.setConnectTimeout(1500);
+  http.setTimeout(1500);
   if (!http.begin(String("http://") + ctrHost + path)) {
+    unlockFor(ctrPullMutex);
     request->send(502, "application/json", "{\"ok\":false,\"error\":\"EVDCTR unreachable\"}");
     return;
   }
@@ -182,6 +198,7 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
   int code = http.POST((uint8_t *)body, bodyLen);
   String out = code > 0 ? http.getString() : "";
   http.end();
+  unlockFor(ctrPullMutex);
   if (code <= 0) request->send(502, "application/json", "{\"ok\":false,\"error\":\"relay failed\"}");
   else request->send(code, "application/json", out);
 }
@@ -210,27 +227,41 @@ inline void handlePairCtr(AsyncWebServerRequest *request, uint8_t *data,
 }
 
 // ---- log -------------------------------------------------------------------
+// The ring is written from both cores (LOGI from setup/loop and from the
+// player task), so the entries are copied out under the lock and the JSON is
+// built outside it. Building a String inside a critical section would block
+// the other core for the whole allocation, and on a fragmented heap that is
+// milliseconds, not microseconds.
 inline void handleLogTail(AsyncWebServerRequest *request) {
   uint32_t since = request->hasParam("since")
                    ? (uint32_t)request->getParam("since")->value().toInt() : 0;
-  String body = "{\"ok\":true,\"lines\":[";
-  bool first = true;
+  struct Line { uint32_t seq, ms; char level; char text[192]; };
+  static Line lines[EVD_LOG_RING_LEN];
+  int n = 0;
+  uint32_t end = 0;
   portENTER_CRITICAL(&gLogRingMux);
-    uint32_t end = gLogRingSeq;
+    end = gLogRingSeq;
     uint32_t oldest = (end >= EVD_LOG_RING_LEN) ? (end - EVD_LOG_RING_LEN + 1) : 1;
     uint32_t start = since + 1;
     if (start < oldest) start = oldest;
-    for (uint32_t s = start; s <= end; ++s) {
+    for (uint32_t s = start; s <= end && n < EVD_LOG_RING_LEN; ++s) {
       const LogRingEntry &e = gLogRing[(s - 1) % EVD_LOG_RING_LEN];
       if (e.seq != s) continue;
-      if (!first) body += ",";
-      first = false;
-      body += "{\"seq\":" + String(e.seq) + ",\"ms\":" + String(e.ms) +
-              ",\"level\":\"" + String(e.level) + "\",\"text\":\"" +
-              jsonEscape(String(e.text)) + "\"}";
+      lines[n].seq = e.seq; lines[n].ms = e.ms; lines[n].level = e.level;
+      memcpy(lines[n].text, e.text, sizeof(lines[n].text));
+      lines[n].text[sizeof(lines[n].text) - 1] = '\0';
+      ++n;
     }
-    body += "],\"nextSeq\":" + String(end) + "}";
   portEXIT_CRITICAL(&gLogRingMux);
+
+  String body = "{\"ok\":true,\"lines\":[";
+  for (int i = 0; i < n; ++i) {
+    if (i) body += ",";
+    body += "{\"seq\":" + String(lines[i].seq) + ",\"ms\":" + String(lines[i].ms) +
+            ",\"level\":\"" + String(lines[i].level) + "\",\"text\":\"" +
+            jsonEscape(String(lines[i].text)) + "\"}";
+  }
+  body += "],\"nextSeq\":" + String(end) + "}";
   sendJson(request, body);
 }
 

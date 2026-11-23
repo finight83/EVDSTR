@@ -14,6 +14,7 @@
 // /api/audio/encoding) and from the link header (rate, per frame).
 volatile uint32_t g_opusSampleRate   = OPUS_SAMPLE_RATE_DEFAULT;
 volatile uint16_t g_opusFrameSamples = OPUS_SAMPLE_RATE_DEFAULT / (1000 / OPUS_FRAME_MS);
+volatile uint8_t  g_opusChannels     = CHANNELS;
 volatile uint32_t g_sourceSampleRate = 48000;
 volatile int g_currentBitrate        = 96000;
 volatile int currentOpusComplexity   = 10;
@@ -64,8 +65,7 @@ SemaphoreHandle_t ctrlMutex = nullptr;
 
 // ---- Statistics ------------------------------------------------------------
 volatile uint32_t statOpusEncoded   = 0;   // frames queued from the link
-volatile uint32_t statOpusDropped   = 0;   // queue full / link stale
-volatile uint32_t statUdpSent       = 0;
+volatile uint32_t statOpusDropped   = 0;   // queue full / link stalevolatile uint32_t statUdpSent       = 0;
 volatile uint32_t statUdpErrors     = 0;
 volatile uint32_t statSyncRequests  = 0;
 volatile uint32_t statSyncRequestErrors = 0;
@@ -79,13 +79,17 @@ volatile uint32_t statQueueTarget   = 3;
 
 portMUX_TYPE gStatsMux = portMUX_INITIALIZER_UNLOCKED;
 
-// ---- Link health (reported by the slave driver) ---------------------------
+// ---- Link health ----------------------------------------------------------
+// DEFINED in EVDAudio.h, which comes later in the include order, so this is a
+// declaration only. All of these are written by audioLinkTask (core 0) and
+// read by the HTTP task and playerTask.
 extern volatile uint32_t statLinkIn;
 extern volatile uint32_t statLinkInBad;
 extern volatile uint32_t statLinkStale;
 extern volatile uint32_t statLinkLastOkMs;
 extern volatile uint32_t statLinkGapMs;
 extern volatile uint32_t gWireSeq;
+extern volatile uint32_t gLastLinkedRate;
 
 // ---- Log ring --------------------------------------------------------------
 #define EVD_LOG_RING_LEN 32

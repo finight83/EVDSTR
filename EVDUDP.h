@@ -49,6 +49,16 @@ inline void setup_udp_transport() {
        AUDIO_UDP_PORT, CTRL_UDP_PORT, CLOCK_SYNC_UDP_PORT);
 }
 
+// ---- pacer health ----------------------------------------------------------
+// The pacer runs on core 0 and its late/lag counters are read by the HTTP task
+// and by playerTask (core 1). A volatile uint32_t is atomic on this core, but
+// the "last second" value is published in one store so a reader never sees a
+// half-updated pair.
+inline void publishPacerHealth(uint32_t lateMs) {
+  statPacerLateMax = (lateMs > statPacerLateMax) ? lateMs : statPacerLateMax;
+  statPacerLateLastSec = lateMs;
+}
+
 // ---- audio fan-out (core 0) ------------------------------------------------
 inline void udpSendTask(void *param) {
   (void)param;
@@ -62,7 +72,11 @@ inline void udpSendTask(void *param) {
     // Seed or re-anchor the schedule only on a real gap, never on lateness.
     bool gap = gPacerSeeded && (uint32_t)(pkt.seq - gPacerLastSeq) > 1;
     uint32_t now = millis();
-    if (!gPacerSeeded) { gPacer.start(now); gPacerSeeded = true; }
+    if (!gPacerSeeded) {
+      gPacer.start(now);
+      gPacerSeeded = true;
+      gap = false;                 // first frame after boot is not a gap
+    }
     gPacerLastSeq = pkt.seq;
 
     uint32_t queued = uxQueueMessagesWaiting(opusQueue);
@@ -78,10 +92,8 @@ inline void udpSendTask(void *param) {
     }
 
     int32_t late = gPacer.latenessMs(now);
-    if (late > 0) {
-      statPacerLateLastSec = (uint32_t)late;
-      if ((uint32_t)late > statPacerLateMax) statPacerLateMax = (uint32_t)late;
-    }
+    if (late > 0) publishPacerHealth((uint32_t)late);
+    else publishPacerHealth(0);
 
     // Header, little-endian, exactly as the players parse it.
     hdr[0] = (uint8_t)(AUDIO_PROTO_MAGIC & 0xFF);

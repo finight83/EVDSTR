@@ -92,7 +92,11 @@ inline void updateNodePerf(const String &ip, uint32_t latencyMs, uint32_t queueD
   }
   pruneStalePerfLocked(now);
   if (nodePerf.size() >= NODE_PERF_MAX_ENTRIES) { unlockFor(perfMutex); return; }
-  nodePerf.push_back({ip, latencyMs, queueDepth, target, rebuffers, now, true});
+  NodePerf np;                    // aggregate init would not fill the strings
+  np.ip = ip; np.latencyMs = latencyMs; np.queueDepth = queueDepth;
+  np.target = target; np.rebuffers = rebuffers; np.updatedMs = now;
+  np.hasData = true;
+  nodePerf.push_back(np);
   unlockFor(perfMutex);
 }
 
@@ -244,8 +248,16 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
       }
     }
     if (!known && playerNodes.size() < MAX_UDP_SUBSCRIBERS * 2) {
-      playerNodes.push_back({pName, ip, pVer, millis(), declaredProtoVer,
-                             negotiated, compatible, String(reason)});
+      PlayerNode np;                // named fields: PlayerNode has Strings and
+      np.name = pName;              // defaults, so a braced list is fragile
+      np.ip = ip;
+      np.version = pVer;
+      np.lastSeenMs = millis();
+      np.declaredAudioProtocolVersion   = declaredProtoVer;
+      np.negotiatedAudioProtocolVersion = negotiated;
+      np.audioCompatible = compatible;
+      np.audioCompatReason = reason;
+      playerNodes.push_back(np);
       isNew = true;
     }
     unlockFor(playersMutex);
@@ -379,19 +391,25 @@ inline void handleOtaResult(AsyncWebServerRequest *request, uint8_t *data,
 }
 
 // ---- node stats sweep (core 1) --------------------------------------------
-// Asking every node for its counters is a player-management job, so it runs on
-// core 1 and never touches the pacer. The node answers with an HTTP POST to
-// /api/node_stats, handled on core 0.
+// Player management, so it runs on core 1. What it does NOT do is speak HTTP:
+// the node answers this sweep by POSTing its counters back to /api/node_stats,
+// which the HTTP task on core 0 handles. Firing an HTTP GET at every node from
+// here would put an HTTPClient (and a TCP handshake, and up to 1.2 s of
+// blocking) on the core that also serves the fleet, once per node per 250 ms.
+//
+// So the sweep is the ctrl-plane nudge: one small datagram per node telling it
+// "report now". The node's reply lands in updateNodePerf() above. This is the
+// same shape the unsplit server used, minus the HTTP client.
 inline void pollNodeStats() {
+  static unsigned long lastPoll = 0;
+  if (millis() - lastPoll < 5000) return;   // once per 5 s per node
+  lastPoll = millis();
+
   std::vector<SubscriberSnap> subs = snapshotSubscribers(millis());
   for (auto &s : subs) {
-    HTTPClient http;
-    http.setConnectTimeout(1200);
-    http.setTimeout(1200);
-    if (http.begin(String("http://") + s.ip + "/api/stats")) {
-      http.GET();
-      http.end();
-    }
+    String json = String("{\"target\":\"") + s.ip +
+                  "\",\"type\":\"stats_request\"}";
+    sendCtrlToSubscriber(s.ip, json);
   }
 }
 
@@ -516,7 +534,14 @@ inline void handleZonesMove(AsyncWebServerRequest *request, uint8_t *data,
     saveZonesToNVS();
   }
   broadcastNodeConfig();
-  sendZoneConfigToIp(ip, 100, false);
+  // Tell the moved node its new zone's volume/mute, not a made-up 100/unmuted.
+  int  zvol = 100;
+  bool zmute = false;
+  if (lockFor(zonesMutex, 80)) {
+    for (auto &z : zones) if (z.id == zone) { zvol = z.volume; zmute = z.muted; break; }
+    unlockFor(zonesMutex);
+  }
+  sendZoneConfigToIp(ip, zvol, zmute);
   request->send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -535,19 +560,26 @@ inline void handleZonesConfig(AsyncWebServerRequest *request, uint8_t *data,
   bool muteSet = in["muted"].is<bool>();
   bool mute = in["muted"] | false;
 
+  // The zone's own values are the ones that must reach its nodes: a request
+  // that only sets `muted` must not reset the volume to 100, and one that only
+  // sets `volume` must keep the zone muted.
   std::vector<String> targets;
+  int  zvol = 100;
+  bool zmute = false;
   if (lockFor(zonesMutex, 120)) {
     for (auto &z : zones) {
       if (z.id != id) continue;
       if (vol >= 0 && vol <= 100) z.volume = vol;
       if (muteSet) z.muted = mute;
+      zvol = z.volume;
+      zmute = z.muted;
       targets = z.nodeIps;
       break;
     }
     unlockFor(zonesMutex);
     saveZonesToNVS();
   }
-  for (auto &ip : targets) sendZoneConfigToIp(ip, vol >= 0 ? vol : 100, mute);
+  for (auto &ip : targets) sendZoneConfigToIp(ip, zvol, zmute);
   broadcastNodeConfig();
   request->send(200, "application/json", "{\"ok\":true}");
 }

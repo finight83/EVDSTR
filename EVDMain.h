@@ -70,7 +70,14 @@ void setup() {
   setup_serial();
   createSyncPrimitives();
 
+  // LittleFS is mounted because the OTA path and the dashboard expect it; 
+  // EVDSTR itself keeps no files there.
   if (!LittleFS.begin(true)) LOGW("LittleFS mount failed");
+
+  // Zones before the HTTP server: the registration handler can run the moment
+  // the server is up and it reads the zone table.
+  loadZonesFromNVS();
+
   loadWiFiSettings();
   setup_wifi_sta();
   serverEpoch = esp_random();
@@ -84,7 +91,6 @@ void setup() {
          PIN_LINK_SCLK, PIN_LINK_MOSI, PIN_LINK_IRQ, PIN_LINK_CS);
   }
 
-  loadZonesFromNVS();
   setupDiscoveryResponder();
   setup_udp_transport();
   setup_http_server();
@@ -103,6 +109,10 @@ void loop() {
   handleClockSyncRequests();   // polled here: one packet per node per few s
   serviceDeferredSettingsFlush();
 
+  // The encoder mirror is an HTTP GET, and HTTPClient is not re-entrant. This
+  // runs on the loop task (core 0, pri 1) every 2 s; the relay in EVDRoutes.h
+  // takes the same mutex, so a dashboard request and this pull can never
+  // overlap on one socket.
   static unsigned long lastMirror = 0;
   if (millis() - lastMirror > 2000) {
     lastMirror = millis();

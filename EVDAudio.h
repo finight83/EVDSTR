@@ -47,7 +47,7 @@ inline void audioLinkTask(void *param) {
     uint32_t rate = 0;
     bool silence = false;
 
-    bool got = linkReceiveFrame(pkt.data, OPUS_MAX_PACKET_BYTES, len,
+    bool got = linkReceiveFrame(pkt.data, MAX_OPUS_PACKET_LEN, len,
                                 samples, channels, rate, silence, 2000);
     uint32_t now = millis();
 
@@ -78,12 +78,21 @@ inline void audioLinkTask(void *param) {
       gLastLinkedRate = rate;
     }
 
+    // A silence frame keeps the encoder's 20 ms cadence but carries no audio.
+    // It is counted and never queued: players already conceal a gap, and an
+    // empty UDP datagram would only reset their concealment counters.
     if (silence || len == 0) {
-      // Consume the pacer slot so the schedule stays absolute, but do not
-      // hand an empty frame to the players.
-      statLinkInBad += 0;
+      statLinkStale++;
       continue;
     }
+
+    // The frame is self-describing: the header carries the encoder's rate and
+    // channel count, so a dashboard re-create on EVDCTR reaches the players'
+    // registrations without any control channel. EVDSTR does not encode, but
+    // it does tell the players what the encoder is doing.
+    if (samples)  g_opusFrameSamples = samples;
+    if (channels) g_opusChannels     = channels;
+    if (rate && rate != g_opusSampleRate) g_opusSampleRate = rate;
 
     // Stamp on THIS board's clock. The two chips boot independently, so the
     // producer's millis() means nothing here; the players only need a
