@@ -1,0 +1,237 @@
+#pragma once
+// ============================================================================
+//  EVDHelpers.h - locks, escaping, and the subscriber/player table helpers
+// ============================================================================
+//  Every table access goes through one of these, so the audio task (core 0)
+//  and the player task (core 1) can never see a partially updated entry.
+// ============================================================================
+
+struct PrefsGuard {
+  Preferences prefs;
+  bool        ok = false;
+  explicit PrefsGuard(const char *ns, bool ro = false) {
+    if (prefsMutex) xSemaphoreTake(prefsMutex, portMAX_DELAY);
+    ok = prefs.begin(ns, ro);
+  }
+  ~PrefsGuard() {
+    if (ok) prefs.end();
+    if (prefsMutex) xSemaphoreGive(prefsMutex);
+  }
+  PrefsGuard(const PrefsGuard &) = delete;
+  PrefsGuard &operator=(const PrefsGuard &) = delete;
+};
+
+inline bool lockFor(SemaphoreHandle_t m, uint32_t ms) {
+  if (!m) return false;
+  return xSemaphoreTake(m, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+inline void unlockFor(SemaphoreHandle_t m) { if (m) xSemaphoreGive(m); }
+
+inline String jsonEscape(const String &in) {
+  String out; out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    unsigned char c = (unsigned char)in[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+        else out += (char)c;
+    }
+  }
+  return out;
+}
+
+inline String htmlEscape(const String &in) {
+  String out; out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    switch (c) {
+      case '<': out += "&lt;";   break;
+      case '>': out += "&gt;";   break;
+      case '&': out += "&amp;";  break;
+      case '"': out += "&quot;"; break;
+      case '\'':out += "&#39;";  break;
+      default:  out += c;
+    }
+  }
+  return out;
+}
+
+inline String sanitizeServerName(const String &in) {
+  String out; out.reserve(in.length());
+  for (size_t i = 0; i < in.length() && out.length() < 32; ++i) {
+    unsigned char c = (unsigned char)in[i];
+    if (isAlphaNumeric(c)) out += (char)c;
+  }
+  return out;
+}
+
+// Zone names are alphanumeric + space + dash + underscore, 1-24 chars.
+inline bool isValidZoneName(const String &n) {
+  if (n.length() == 0 || n.length() > 24) return false;
+  for (size_t i = 0; i < n.length(); ++i) {
+    unsigned char c = (unsigned char)n[i];
+    if (!(isAlphaNumeric(c) || c == ' ' || c == '-' || c == '_')) return false;
+  }
+  return true;
+}
+
+// ---- Subscriber table ------------------------------------------------------
+// A snapshot is what the audio task works from, so a node that registers or
+// dies mid-packet cannot change the fan-out set under it.
+struct SubscriberSnap {
+  String ip;
+  bool   audioCompatible;
+  int    negotiatedAudioProtocolVersion;
+  bool   provisional;
+};
+
+inline std::vector<SubscriberSnap> snapshotSubscribers(unsigned long now) {
+  std::vector<SubscriberSnap> out;
+  out.reserve(MAX_UDP_SUBSCRIBERS);
+  if (!lockFor(subsMutex, 20)) return out;
+  for (int i = 0; i < subscriberCount; ++i) {
+    const Subscriber &s = subscribers[i];
+    if (s.ip.length() == 0) continue;
+    if (now - s.lastSeenMs > PLAYER_STALE_TIMEOUT_MS) continue;
+    if (s.consecutiveSendFailures >= MAX_SEND_FAILURES_BEFORE_SKIP) continue;
+    if (!s.audioCompatible) continue;
+    out.push_back({s.ip, s.audioCompatible, s.negotiatedAudioProtocolVersion,
+                   s.provisional});
+  }
+  unlockFor(subsMutex);
+  return out;
+}
+
+inline int findSubscriberLocked(const String &ip) {
+  for (int i = 0; i < subscriberCount; ++i) {
+    if (subscribers[i].ip == ip) return i;
+  }
+  return -1;
+}
+
+inline int findOrCreateSubscriberLocked(const String &ip, const String &name,
+                                        int declaredProto, int negotiatedProto,
+                                        bool compatible) {
+  int slot = findSubscriberLocked(ip);
+  if (slot >= 0) {
+    subscribers[slot].name       = name;
+    subscribers[slot].lastSeenMs = millis();
+    subscribers[slot].declaredAudioProtocolVersion   = declaredProto;
+    subscribers[slot].negotiatedAudioProtocolVersion = negotiatedProto;
+    subscribers[slot].audioCompatible                = compatible;
+    subscribers[slot].consecutiveSendFailures        = 0;
+    return slot;
+  }
+  if (subscriberCount >= MAX_UDP_SUBSCRIBERS) return -1;
+  slot = subscriberCount++;
+  subscribers[slot] = Subscriber();
+  subscribers[slot].ip    = ip;
+  subscribers[slot].name  = name;
+  subscribers[slot].lastSeenMs = millis();
+  subscribers[slot].declaredAudioProtocolVersion   = declaredProto;
+  subscribers[slot].negotiatedAudioProtocolVersion = negotiatedProto;
+  subscribers[slot].audioCompatible                = compatible;
+  return slot;
+}
+
+inline void pruneStaleSubscribers(unsigned long now) {
+  if (!lockFor(subsMutex, 50)) return;
+  for (int i = subscriberCount - 1; i >= 0; --i) {
+    if (now - subscribers[i].lastSeenMs <= PLAYER_STALE_TIMEOUT_MS) continue;
+    LOGW("subscriber %s pruned (silent %lu ms)", subscribers[i].ip.c_str(),
+         (unsigned long)(now - subscribers[i].lastSeenMs));
+    for (int j = i; j < subscriberCount - 1; ++j) subscribers[j] = subscribers[j + 1];
+    subscriberCount--;
+  }
+  unlockFor(subsMutex);
+}
+
+// ---- Player table ----------------------------------------------------------
+inline void pruneStalePlayersLocked(unsigned long now) {
+  for (int i = (int)playerNodes.size() - 1; i >= 0; --i) {
+    if (now - playerNodes[i].lastSeenMs > PLAYER_STALE_TIMEOUT_MS) {
+      playerNodes.erase(playerNodes.begin() + i);
+    }
+  }
+}
+
+inline std::vector<PlayerNode> snapshotPlayers(unsigned long now) {
+  std::vector<PlayerNode> out;
+  if (!lockFor(playersMutex, 20)) return out;
+  pruneStalePlayersLocked(now);
+  out = playerNodes;
+  unlockFor(playersMutex);
+  return out;
+}
+
+// ---- Zones -----------------------------------------------------------------
+inline std::vector<Zone> snapshotZones() {
+  std::vector<Zone> out;
+  if (!lockFor(zonesMutex, 50)) return out;
+  out = zones;
+  unlockFor(zonesMutex);
+  return out;
+}
+
+// ---- Node perf -------------------------------------------------------------
+inline void pruneStalePerfLocked(unsigned long now) {
+  for (int i = (int)nodePerf.size() - 1; i >= 0; --i) {
+    if (now - nodePerf[i].updatedMs > PLAYER_STALE_TIMEOUT_MS) {
+      nodePerf.erase(nodePerf.begin() + i);
+    }
+  }
+}
+
+inline std::vector<NodePerf> snapshotPerf() {
+  std::vector<NodePerf> out;
+  if (!lockFor(perfMutex, 20)) return out;
+  pruneStalePerfLocked(millis());
+  out = nodePerf;
+  unlockFor(perfMutex);
+  return out;
+}
+
+// ---- Request body accumulation --------------------------------------------
+inline bool accumulateReqBody(AsyncWebServerRequest *request,
+                              const uint8_t *data, size_t len, size_t index,
+                              size_t total, size_t cap,
+                              const char *tooLargeJson,
+                              const char *&bodyOut, size_t &lenOut) {
+  static String slot;
+  if (index == 0) {
+    slot = "";
+    if (total > cap) { request->send(413, "application/json", tooLargeJson); return false; }
+    slot.reserve(total + 1);
+  }
+  if (slot.length() + len > cap) {
+    slot = "";
+    request->send(413, "application/json", tooLargeJson);
+    return false;
+  }
+  for (size_t i = 0; i < len; ++i) slot += (char)data[i];
+  if (index + len >= total) {
+    bodyOut = slot.c_str();
+    lenOut  = slot.length();
+    return true;
+  }
+  return false;
+}
+
+// ---- Log ring --------------------------------------------------------------
+#include <cstdarg>
+inline void evdLogPrintf(char level, const char *fmt, ...) {
+  char buf[192];
+  va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+  portENTER_CRITICAL(&gLogRingMux);
+    LogRingEntry &e = gLogRing[gLogRingSeq % EVD_LOG_RING_LEN];
+    e.seq = ++gLogRingSeq; e.ms = millis(); e.level = level;
+    strncpy(e.text, buf, sizeof(e.text) - 1);
+    e.text[sizeof(e.text) - 1] = '\0';
+  portEXIT_CRITICAL(&gLogRingMux);
+  Serial.printf("[%c] %s\n", level, buf);
+}
