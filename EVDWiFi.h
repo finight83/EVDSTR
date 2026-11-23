@@ -117,6 +117,20 @@ inline void serviceDiscovery() {
   discoveryUdp.endPacket();
 }
 
+// ---- Encoder mirror task ---------------------------------------------------
+// The pull below is an HTTP GET with a 1.5 s timeout. Running it from loop()
+// meant that while EVDCTR was unreachable, every second loop iteration blocked
+// for 1.5 s and took discovery, the settings flush and clock sync with it. It
+// gets its own task now: a stalled pull costs nothing but a stale mirror.
+inline void encoderMirrorTask(void *param) {
+  (void)param;
+  LOGI("encoderMirrorTask started on core %d", xPortGetCoreID());
+  for (;;) {
+    refreshEncoderMirror();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+
 // ---- Encoder mirror pull ---------------------------------------------------
 // The players are told the encoder's parameters on registration and on every
 // ctrl push, and those parameters live on EVDCTR. One small GET every 2 s

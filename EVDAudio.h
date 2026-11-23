@@ -162,5 +162,11 @@ inline void setup_queues_and_tasks() {
                                nullptr, 1);
   if (rc != pdPASS) LOGE("FAILED to create playerTask (%d)", (int)rc);
 
-  LOGI("Task layout: core 0 = link in + UDP pacer, core 1 = player management");
+  // The encoder mirror is an HTTP client, not audio: it lives on core 0 at a
+  // low priority so a slow EVDCTR can never delay the link or the pacer.
+  rc = xTaskCreatePinnedToCore(encoderMirrorTask, "mirror", 4096, nullptr, 1,
+                               nullptr, 0);
+  if (rc != pdPASS) LOGE("FAILED to create encoderMirrorTask (%d)", (int)rc);
+
+  LOGI("Task layout: core 0 = link in + UDP pacer + mirror, core 1 = players");
 }

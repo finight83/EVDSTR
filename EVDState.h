@@ -65,7 +65,8 @@ SemaphoreHandle_t ctrlMutex = nullptr;
 
 // ---- Statistics ------------------------------------------------------------
 volatile uint32_t statOpusEncoded   = 0;   // frames queued from the link
-volatile uint32_t statOpusDropped   = 0;   // queue full / link stalevolatile uint32_t statUdpSent       = 0;
+volatile uint32_t statOpusDropped   = 0;   // queue full / link stale
+volatile uint32_t statUdpSent       = 0;   // datagrams actually put on the wire
 volatile uint32_t statUdpErrors     = 0;
 volatile uint32_t statSyncRequests  = 0;
 volatile uint32_t statSyncRequestErrors = 0;

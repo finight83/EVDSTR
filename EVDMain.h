@@ -113,11 +113,11 @@ void loop() {
   // runs on the loop task (core 0, pri 1) every 2 s; the relay in EVDRoutes.h
   // takes the same mutex, so a dashboard request and this pull can never
   // overlap on one socket.
-  static unsigned long lastMirror = 0;
-  if (millis() - lastMirror > 2000) {
-    lastMirror = millis();
-    refreshEncoderMirror();
-  }
+  // Not from here. loop() is the only task that services discovery, the
+  // settings flush and clock sync; a blocking GET with a 1.5 s timeout every
+  // 2 s (EVDCTR unreachable) stalled all three. The pull runs in its own task,
+  // started in setup().
+  (void)0;
 
   delay(5);
 }

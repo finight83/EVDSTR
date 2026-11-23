@@ -12,6 +12,7 @@
 //  works unchanged.
 // ============================================================================
 #include <Update.h>
+#include <ESPAsyncWebServer.h>
 
 volatile bool otaUploadInProgress = false;
 volatile bool otaInProgress       = false;
@@ -77,6 +78,9 @@ inline void handleOtaApply(AsyncWebServerRequest *request, uint8_t *data,
   request->send(200, "application/json",
                 "{\"ok\":true,\"message\":\"image applied by upload\"}");
 }
+
+// The server instance lives in EVDRoutes.h, included after this file.
+extern AsyncWebServer server;
 
 inline void setupOtaRoutes() {
   server.on("/api/ota/status", HTTP_GET, handleOtaStatus);

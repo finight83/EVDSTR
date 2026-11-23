@@ -10,9 +10,34 @@
 // ============================================================================
 #include <ArduinoJson.h>
 
+// Owned by EVDOTA.h (included after this file). Declared here because the
+// zone handlers refuse to mutate config while an update is being written.
+extern volatile bool otaInProgress;
+extern volatile bool otaUploadInProgress;
+
 // ---- Zones persistence -----------------------------------------------------
 // Bar-encoded in NVS, one string: "id|name|vol|mute|ip,ip;id|name|..." — small
 // enough for one NVS blob and atomic on write.
+// Caller MUST already hold zonesMutex. snapshotZones() takes the same
+// non-recursive mutex, so calling it from under the lock returned an EMPTY
+// vector and persisted an empty zone table - zones gone after a reboot.
+inline void saveZonesToNVSLocked() {
+  String enc;
+  for (size_t i = 0; i < zones.size(); ++i) {
+    if (i) enc += ";";
+    enc += zones[i].id + "|" + zones[i].name + "|" + String(zones[i].volume) + "|" +
+           (zones[i].muted ? "1" : "0") + "|";
+    for (size_t j = 0; j < zones[i].nodeIps.size(); ++j) {
+      if (j) enc += ",";
+      enc += zones[i].nodeIps[j];
+    }
+  }
+  PrefsGuard g("evdstr", false);
+  if (!g.ok) return;
+  g.prefs.putString("zones", enc);
+}
+
+// Safe from anywhere: takes its own snapshot.
 inline void saveZonesToNVS() {
   std::vector<Zone> zc = snapshotZones();
   String enc;
@@ -276,6 +301,7 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
   // A node seen for the first time joins Main Room, so per-zone volume/mute
   // reach it immediately instead of waiting for the operator to drag it in.
   if (isNew) {
+    bool assigned = false;
     if (lockFor(zonesMutex, 80)) {
       bool inAny = false;
       for (auto &z : zones) for (auto &zip : z.nodeIps) if (zip == ip) { inAny = true; break; }
@@ -283,15 +309,20 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
         for (auto &z : zones) {
           if (z.id == MAIN_ZONE_ID) {
             z.nodeIps.push_back(ip);
-            settingsDirty = true;
-            settingsDirtySince = millis();
-            LOGI("zone: %s auto-assigned to Main Room", ip.c_str());
+            // Save under the lock we already hold. The deferred settings
+            // flush would do it later, but only through snapshotZones(),
+            // which needs this same mutex.
+            saveZonesToNVSLocked();
+            assigned = true;
             break;
           }
         }
       }
       unlockFor(zonesMutex);
     }
+    // LOGI() takes the log-ring lock. Calling it inside zonesMutex nests two
+    // locks from the HTTP worker, which is how a lock-order stall starts.
+    if (assigned) LOGI("zone: %s auto-assigned to Main Room", ip.c_str());
   }
 
   if (isNew) {
@@ -378,7 +409,11 @@ inline void handleNodeStats(AsyncWebServerRequest *request, uint8_t *data,
 
 inline void handleOtaResult(AsyncWebServerRequest *request, uint8_t *data,
                             size_t len, size_t index, size_t total) {
-  if (index != 0 || len != total) { if (index != 0) return; }
+  // A player reports one small JSON object. Parse only the first segment: the
+  // old code returned early on every later segment without ever sending a
+  // response, so a fragmented body left the player's request hanging until its
+  // own timeout.
+  if (index != 0) { request->send(200, "application/json", "{\"ok\":true}"); return; }
   String ip = request->client()->remoteIP().toString();
   bool success = false;
   if (len > 0 && data) {
@@ -463,7 +498,11 @@ inline void handleZonesCreate(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["name"].is<const char*>()) {
+  // Parse while the body buffer is still alive, then release it: the
+  // document has its own copy, and nothing below reads body.
+  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["name"].is<const char*>());
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -477,8 +516,8 @@ inline void handleZonesCreate(AsyncWebServerRequest *request, uint8_t *data,
   if (lockFor(zonesMutex, 100)) {
     Zone z; z.id = id; z.name = name; z.volume = 100; z.muted = false;
     zones.push_back(z);
+    saveZonesToNVSLocked();
     unlockFor(zonesMutex);
-    saveZonesToNVS();
   }
   broadcastNodeConfig();
   request->send(200, "application/json",
@@ -491,7 +530,11 @@ inline void handleZonesDelete(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["id"].is<const char*>()) {
+  // Parse while the body buffer is still alive, then release it: the
+  // document has its own copy, and nothing below reads body.
+  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["id"].is<const char*>());
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -504,8 +547,8 @@ inline void handleZonesDelete(AsyncWebServerRequest *request, uint8_t *data,
     for (int i = (int)zones.size() - 1; i >= 0; --i) {
       if (zones[i].id == id) { zones.erase(zones.begin() + i); break; }
     }
+    saveZonesToNVSLocked();
     unlockFor(zonesMutex);
-    saveZonesToNVS();
   }
   broadcastNodeConfig();
   request->send(200, "application/json", "{\"ok\":true}");
@@ -517,8 +560,11 @@ inline void handleZonesMove(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["ip"].is<const char*>() ||
-      !in["zone"].is<const char*>()) {
+  // Parse while the body buffer is still alive, then release it.
+  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["ip"].is<const char*>() ||
+                  !in["zone"].is<const char*>());
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -530,11 +576,13 @@ inline void handleZonesMove(AsyncWebServerRequest *request, uint8_t *data,
       }
     }
     for (auto &z : zones) if (z.id == zone) { z.nodeIps.push_back(ip); break; }
+    saveZonesToNVSLocked();
     unlockFor(zonesMutex);
-    saveZonesToNVS();
   }
   broadcastNodeConfig();
   // Tell the moved node its new zone's volume/mute, not a made-up 100/unmuted.
+  // One lock, read once: two lockFor() calls around one lookup would let a
+  // concurrent delete change the answer between them.
   int  zvol = 100;
   bool zmute = false;
   if (lockFor(zonesMutex, 80)) {
@@ -551,7 +599,11 @@ inline void handleZonesConfig(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["id"].is<const char*>()) {
+  // Parse while the body buffer is still alive, then release it: the
+  // document has its own copy, and nothing below reads body.
+  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["id"].is<const char*>());
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -576,8 +628,8 @@ inline void handleZonesConfig(AsyncWebServerRequest *request, uint8_t *data,
       targets = z.nodeIps;
       break;
     }
+    saveZonesToNVSLocked();
     unlockFor(zonesMutex);
-    saveZonesToNVS();
   }
   for (auto &ip : targets) sendZoneConfigToIp(ip, zvol, zmute);
   broadcastNodeConfig();
@@ -590,7 +642,11 @@ inline void handleZonesRemoveNode(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["ip"].is<const char*>()) {
+  // Parse while the body buffer is still alive, then release it: the
+  // document has its own copy, and nothing below reads body.
+  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["ip"].is<const char*>());
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -601,8 +657,8 @@ inline void handleZonesRemoveNode(AsyncWebServerRequest *request, uint8_t *data,
         if (z.nodeIps[i] == ip) z.nodeIps.erase(z.nodeIps.begin() + i);
       }
     }
+    saveZonesToNVSLocked();
     unlockFor(zonesMutex);
-    saveZonesToNVS();
   }
   broadcastNodeConfig();
   request->send(200, "application/json", "{\"ok\":true}");

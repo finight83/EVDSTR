@@ -97,7 +97,9 @@ inline void handleApiConfig(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 1024,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(512);
-  if (deserializeJson(in, body, bodyLen)) {
+  bool badBody = (deserializeJson(in, body, bodyLen) != DeserializationError::Ok);
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -175,6 +177,7 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   if (!ctrHost.length()) {
+    releaseReqBody(request);
     request->send(503, "application/json",
                   "{\"ok\":false,\"error\":\"EVDCTR not paired\"}");
     return;
@@ -183,6 +186,7 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
   // not hold it, so the timeout is short and the same mutex the mirror pull
   // uses keeps two relays from stacking up on one socket.
   if (!lockFor(ctrPullMutex, 300)) {
+    releaseReqBody(request);
     request->send(503, "application/json", "{\"ok\":false,\"error\":\"relay busy\"}");
     return;
   }
@@ -190,12 +194,16 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
   http.setConnectTimeout(1500);
   http.setTimeout(1500);
   if (!http.begin(String("http://") + ctrHost + path)) {
+    releaseReqBody(request);
     unlockFor(ctrPullMutex);
     request->send(502, "application/json", "{\"ok\":false,\"error\":\"EVDCTR unreachable\"}");
     return;
   }
   http.addHeader("Content-Type", "application/json");
   int code = http.POST((uint8_t *)body, bodyLen);
+  // The relay is the one handler that needs the body after parsing: EVDCTR
+  // receives it verbatim. Release only now.
+  releaseReqBody(request);
   String out = code > 0 ? http.getString() : "";
   http.end();
   unlockFor(ctrPullMutex);
@@ -212,7 +220,9 @@ inline void handlePairCtr(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  if (deserializeJson(in, body, bodyLen) || !in["host"].is<const char*>()) {
+  bool badBody = deserializeJson(in, body, bodyLen) || !in["host"].is<const char*>();
+  releaseReqBody(request);
+  if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -220,6 +230,13 @@ inline void handlePairCtr(AsyncWebServerRequest *request, uint8_t *data,
   host.trim();
   if (host.startsWith("http://")) host = host.substring(7);
   while (host.endsWith("/")) host.remove(host.length() - 1);
+  // Same gate as EVDCTR's pairing: a hostname or IPv4 address, nothing that
+  // could be a path or a scheme.
+  if (!isPairableHost(host)) {
+    request->send(400, "application/json",
+                  "{\"ok\":false,\"error\":\"expected an IPv4 address or hostname\"}");
+    return;
+  }
   ctrHost = host;
   saveWiFiSettings();
   request->send(200, "application/json",

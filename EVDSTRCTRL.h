@@ -101,7 +101,10 @@ async function tick() {
   $('#p-ip').textContent = s.ip + ' (' + s.rssi + ' dBm)';
   $('#p-ver').textContent = 'STR ' + s.version;
   $('#p-subs').textContent = s.subscribers + ' player' + (s.subscribers === 1 ? '' : 's');
-  const linkOk = s.linkGapMs < 200;
+  // 400 ms, the same threshold audioLinkTask uses (LINK_STALE_DROP_MS) and the
+  // same one /api/state reports. A dashboard that disagrees with the audio task
+  // about whether the link is alive is worse than no indicator.
+  const linkOk = s.linkGapMs < 400;
   $('#p-link').textContent = linkOk ? 'link ok' : 'link idle ' + s.linkGapMs + ' ms';
   $('#p-link').className = 'pill ' + (linkOk ? 'ok' : 'bad');
 

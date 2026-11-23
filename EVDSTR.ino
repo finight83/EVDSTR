@@ -241,6 +241,7 @@ inline void setupOtaRoutes();
 inline void handleApiState(AsyncWebServerRequest *request);
 inline bool setupLinkSpi();
 inline void refreshEncoderMirror();
+inline void encoderMirrorTask(void *param);
 inline void serviceDiscovery();
 inline void handleRestart(AsyncWebServerRequest *request);
 // Defined later in the include chain (EVDAudio.h / EVDPlayers.h), but called
