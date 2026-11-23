@@ -136,6 +136,13 @@ static_assert(MAX_OPUS_PACKET_LEN == LINK_MAX_PAYLOAD,
 #define DISCOVERY_PORT      4201
 #define DISCOVERY_MAGIC_REQ "ENKELVOUDP/1 DISCOVER"
 #define DISCOVERY_MAGIC_RPY "ENKELVOUDP/1 SERVER"
+// How often an unpaired board broadcasts a probe. 3 s is fast enough that two
+// freshly flashed boards pair while you are still looking at the dashboard, and
+// slow enough that a lone board does not chatter on a busy LAN.
+#define DISCOVERY_TX_MS     3000
+// How often a board re-announces itself once paired, so a partner that was
+// rebooted with a stale address can find it again.
+#define DISCOVERY_ANNOUNCE_MS 60000
 
 #define MAX_UDP_SUBSCRIBERS 16
 #define MAX_SEND_FAILURES_BEFORE_SKIP 10

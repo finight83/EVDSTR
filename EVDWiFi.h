@@ -92,29 +92,82 @@ inline void handleRestart(AsyncWebServerRequest *request) {
 }
 
 // ---- Discovery -------------------------------------------------------------
-// EVDSTR answers the same probe, but identifies itself as the streamer. This
-// is what lets a freshly flashed CTR find its partner without anyone typing
-// an IP, and what lets an operator tell the two boards apart in a scan.
+// EVDSTR answers the same probe, but identifies itself as the streamer, and -
+// like EVDCTR - broadcasts a probe of its own while it has no controller. Two
+// freshly flashed boards on the same LAN therefore find each other with no IP
+// typed anywhere.
+//
+// EVDSTR does not pair itself: the controller owns the pairing (it is the one
+// that pushes the stream and the OTA image). EVDSTR's job is to be findable,
+// and to pick up its controller's address from the reply so the encoder mirror
+// and the status push have somewhere to go.
+static unsigned long gLastProbeMs = 0;
+volatile uint32_t statDiscoveryProbes = 0;
+
 inline void setupDiscoveryResponder() {
   if (!discoveryUdp.begin(DISCOVERY_PORT)) {
     LOGE("discovery: bind %d failed", DISCOVERY_PORT);
   }
 }
 
+// Pull "key=value" out of a reply line. Values never contain spaces.
+inline bool discoveryField(const char *line, const char *key, String &out) {
+  String k = String(key) + "=";
+  int at = String(line).indexOf(k);
+  if (at < 0) return false;
+  at += k.length();
+  int end = at;
+  while (line[end] && line[end] != ' ') ++end;
+  if (end == at) return false;
+  out = String(line).substring(at, end);
+  return true;
+}
+
+inline void sendDiscoveryProbe() {
+  if (!WiFi.isConnected()) return;
+  IPAddress mask = WiFi.subnetMask();
+  IPAddress ip   = WiFi.localIP();
+  IPAddress bcast((ip[0] | ~mask[0]) & 0xFF, (ip[1] | ~mask[1]) & 0xFF,
+                  (ip[2] | ~mask[2]) & 0xFF, (ip[3] | ~mask[3]) & 0xFF);
+  statDiscoveryProbes++;
+  discoveryUdp.beginPacket(bcast, DISCOVERY_PORT);
+  discoveryUdp.write((const uint8_t *)DISCOVERY_MAGIC_REQ, strlen(DISCOVERY_MAGIC_REQ));
+  discoveryUdp.endPacket();
+}
+
 inline void serviceDiscovery() {
   int sz = discoveryUdp.parsePacket();
-  if (sz <= 0) return;
-  char buf[96];
-  int n = discoveryUdp.read(buf, sizeof(buf) - 1);
-  if (n <= 0) return;
-  buf[n] = '\0';
-  if (strncmp(buf, DISCOVERY_MAGIC_REQ, strlen(DISCOVERY_MAGIC_REQ)) != 0) return;
-  String reply = String(DISCOVERY_MAGIC_RPY) + " role=str name=" +
-                 sanitizeServerName(serverName) + " ip=" +
-                 WiFi.localIP().toString() + " ctr=" + ctrHost;
-  discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
-  discoveryUdp.write((const uint8_t *)reply.c_str(), reply.length());
-  discoveryUdp.endPacket();
+  if (sz > 0) {
+    char buf[128];
+    int n = discoveryUdp.read(buf, sizeof(buf) - 1);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, DISCOVERY_MAGIC_REQ, strlen(DISCOVERY_MAGIC_REQ)) == 0) {
+        String reply = String(DISCOVERY_MAGIC_RPY) + " role=str name=" +
+                       sanitizeServerName(serverName) + " ip=" +
+                       WiFi.localIP().toString() + " ctr=" + ctrHost;
+        discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
+        discoveryUdp.write((const uint8_t *)reply.c_str(), reply.length());
+        discoveryUdp.endPacket();
+      } else if (strncmp(buf, DISCOVERY_MAGIC_RPY, strlen(DISCOVERY_MAGIC_RPY)) == 0) {
+        String role, host;
+        if (discoveryField(buf, "role", role) && role == "ctr" &&
+            discoveryField(buf, "ip", host) && isPairableHost(host)) {
+          if (!ctrHost.length()) {
+            ctrHost = host;
+            saveWiFiSettings();   // ctrhost lives in the same namespace
+            LOGI("discovery: controller found at %s (automatic)", host.c_str());
+          }
+        }
+      }
+    }
+  }
+
+  if (ctrHost.length() || !WiFi.isConnected()) return;
+  unsigned long now = millis();
+  if (now - gLastProbeMs < DISCOVERY_TX_MS) return;
+  gLastProbeMs = now;
+  sendDiscoveryProbe();
 }
 
 // ---- Encoder mirror task ---------------------------------------------------

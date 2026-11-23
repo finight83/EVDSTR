@@ -348,3 +348,55 @@ about partitions. With the custom scheme both boards report 8% of 16 MB.
 - `EVDAudio.h` uses the legacy I2S driver's `dma_buf_count` / `dma_buf_len`,
   deprecated in 3.x. Still present in 3.3.0, gone in 4.x.
 - Two `/*` inside comments in `EVDCTR.ino`'s header block.
+
+---
+
+## 8. Automatic CTR/STR discovery
+
+Pairing used to be manual in both directions: you typed EVDSTR's IP on the
+controller and EVDCTR's IP on the streamer. Both boards already answered the
+`ENKELVOUDP/1 DISCOVER` probe, but **nothing ever sent it** - `DISCOVERY_MAGIC_REQ`
+was only ever compared, never broadcast. So the responder was dead code and the
+only way to pair was to type two addresses.
+
+### What it does now
+
+One UDP socket on port 4201, used in both directions:
+
+| direction | CTR | STR |
+|---|---|---|
+| answers probes | `role=ctr name=... ip=...` | `role=str name=... ip=... ctr=...` |
+| probes while unpaired | every 3 s (`DISCOVERY_TX_MS`) | every 3 s |
+| on hearing the partner | takes `role=str`'s `ip`, **verifies it over HTTP**, saves it | takes `role=ctr`'s `ip`, saves it |
+
+- The probe goes to the **subnet broadcast** (`ip | ~mask`), not
+  `255.255.255.255`, which most APs and every client-isolation rule drop.
+- CTR only auto-pairs when `strHost` is empty. A stored address is a deliberate
+  choice and a stray board on the LAN must not overwrite it. The manual
+  `/api/link/pair` on the Stream tab still wins.
+- CTR does not trust the reply: it calls `/api/state` on the address first, and
+  only keeps it if that answers. Otherwise it keeps probing, so it cannot lock
+  onto a half-booted board.
+- EVDSTR never pairs *itself*: the controller owns the pairing (it is the side
+  that pushes audio and OTA). EVDSTR just becomes findable and records where its
+  controller is, so the encoder mirror and the status push have a destination.
+- Both dashboards say what is happening: the CTR Stream panel shows
+  `Paired by: discovery | typed` and `Probes sent`, the pill reads
+  `STR searching...` while unpaired, and the diagnosis line explains that guest
+  WiFi / client isolation blocks discovery. EVDSTR's page shows the probe count
+  in place of a bare "not paired".
+
+### Also fixed
+
+`chk3.py`, the forward-order checker, counted a header as "declared" only if the
+prototype was in the `.ino`. Prototypes in headers were invisible, which hid
+real ordering bugs. It now sees prototypes in any header, and ignores macros
+(`LOGI`, `portENTER_CRITICAL`, `pdMS_TO_TICKS`) that it had been mistaking for
+function calls. Both trees report 0.
+
+### Build after the change
+
+| | sketch | flash | RAM |
+|---|---|---|---|
+| EVDCTR | 1 454 191 B | 8% | 95 452 B (29%) |
+| EVDSTR | 1 238 303 B | 7% | 66 380 B (20%) |

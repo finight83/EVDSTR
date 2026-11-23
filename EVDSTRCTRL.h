@@ -121,7 +121,7 @@ async function tick() {
   $('#link').innerHTML = kv({
     'Frames in': s.linkIn,
     'Last gap': s.linkGapMs + ' ms',
-    Controller: s.ctr || 'not paired'
+    Controller: s.ctr || ('searching\u2026 ' + (s.discoveryProbes ?? 0) + ' probes sent')
   });
   if (!$('#vol').matches(':active')) { $('#vol').value = s.volume; $('#volv').textContent = s.volume; }
   if (!$('#buf').matches(':active')) { $('#buf').value = s.bufferMs; $('#bufv').textContent = s.bufferMs + ' ms'; }

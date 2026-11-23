@@ -58,7 +58,8 @@ inline void handleApiState(AsyncWebServerRequest *request) {
   j += "\"mode\":\"" + String(playbackModeCStr()) + "\",";
   j += "\"heapFree\":" + String((unsigned long)ESP.getFreeHeap()) + ",";
   j += "\"heapMinFree\":" + String((unsigned long)ESP.getMinFreeHeap()) + ",";
-  j += "\"ctr\":\"" + jsonEscape(ctrHost) + "\"}";
+  j += "\"ctr\":\"" + jsonEscape(ctrHost) + "\",";
+  j += "\"discoveryProbes\":" + String((unsigned long)statDiscoveryProbes) + "}";
   sendJson(request, j);
 }
 
