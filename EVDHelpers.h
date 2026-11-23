@@ -211,6 +211,31 @@ inline std::vector<NodePerf> snapshotPerf() {
   return out;
 }
 
+// ---- Fragment policy for player-facing bodies ------------------------------
+// A body that arrives in more than one TCP segment must be refused, not
+// half-parsed: register would omit audioProtocolVersion and mark the node
+// incompatible (silencing it), and a zone mutation would parse a truncated
+// object as valid JSON. AsyncWebServer also aborts the connection on a 413, so
+// "wait for the next segment" can never work - every segment has to be
+// answered, and only the first one carries the verdict.
+//
+// Lives here rather than in EVDRoutes.h because EVDPlayers.h is included
+// before it and uses both.
+inline bool bodyIsFragmented(size_t index, size_t len, size_t total) {
+  return index != 0 || len != total;
+}
+
+inline void answerFragmentedBody(AsyncWebServerRequest *request, size_t index,
+                                 size_t len, size_t total) {
+  if (index == 0) {
+    request->send(413, "application/json",
+                  "{\"ok\":false,\"error\":\"body fragmented; retry\"}");
+  } else if (index + len >= total) {
+    // Tail of a body whose head was already answered.
+    request->send(200, "application/json", "{\"ok\":true,\"dropped\":true}");
+  }
+}
+
 // ---- Request-body accumulation --------------------------------------------
 // AsyncWebServer delivers a POST body in segments, and several requests can be
 // in flight at once on the same AsyncTCP worker: a player's

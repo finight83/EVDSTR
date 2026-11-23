@@ -175,14 +175,16 @@ inline void sendCtrlToSubscriber(const String &ip, const String &json) {
 // ---- clock sync ------------------------------------------------------------
 // RTT exchange. The node timestamps its send, we stamp receipt before parsing
 // (parsing time would bias the offset asymmetrically), and reply with both.
-inline void handleClockSyncRequests() {
+// Returns true when a datagram was consumed, so the caller can drain the
+// socket in a bounded loop instead of handling one packet per loop() pass.
+inline bool handleClockSyncRequests() {
   int sz = clockSyncUdp.parsePacket();
-  if (sz <= 0) return;
+  if (sz <= 0) return false;
   const uint32_t serverRxMs = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
   uint8_t buf[192];
   int n = clockSyncUdp.read(buf, sizeof(buf) - 1);
-  if (n <= 0) { statSyncRequestErrors++; return; }
+  if (n <= 0) { statSyncRequestErrors++; return true; }
   buf[n] = '\0';
 
   IPAddress remote = clockSyncUdp.remoteIP();
@@ -191,9 +193,15 @@ inline void handleClockSyncRequests() {
   DynamicJsonDocument in(256);
   if (deserializeJson(in, (const char *)buf, (size_t)n)) {
     statSyncRequestErrors++;
-    return;
+    return true;
   }
-  if (!in["clientMs"].is<uint32_t>()) { statSyncRequestErrors++; return; }
+  // is<uint32_t>() is FALSE for 0: ArduinoJson 6 refuses an integer that could
+  // be negative, so a node whose clock had just started (clientMs == 0) was
+  // counted as a bad request and got no reply. Accept any unsigned fit.
+  if (!(in["clientMs"].is<unsigned long>() || in["clientMs"].is<int>())) {
+    statSyncRequestErrors++;
+    return true;
+  }
   uint32_t clientMs = in["clientMs"].as<uint32_t>();
   uint32_t serverTxMs = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
@@ -224,6 +232,7 @@ inline void handleClockSyncRequests() {
   } else {
     statSyncRequestErrors++;
   }
+  return true;
 }
 
 // ---- authoritative time broadcast (core 1) --------------------------------

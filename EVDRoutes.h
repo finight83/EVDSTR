@@ -98,9 +98,12 @@ inline void handleApiConfig(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 1024,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(512);
-  bool badBody = (deserializeJson(in, body, bodyLen) != DeserializationError::Ok);
-  releaseReqBody(request);
-  if (badBody) {
+  // Parse and judge BEFORE the release: `body` points into the buffer that
+  // releaseReqBody() frees, so a parse folded into the same expression as the
+  // release reads freed memory (in practice it still parses, which is why it
+  // "worked", but it is a use-after-free on every POST /api/config).
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  if (bodyErr != DeserializationError::Ok) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
@@ -191,14 +194,20 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
     request->send(503, "application/json", "{\"ok\":false,\"error\":\"relay busy\"}");
     return;
   }
+  // From here on the mutex MUST be released on every path, including an early
+  // return: an unlock missed on one branch leaves every later relay answering
+  // 503 "relay busy" until the board reboots. An RAII guard cannot be missed.
+  struct RelayUnlock {
+    SemaphoreHandle_t m;
+    ~RelayUnlock() { unlockFor(m); }
+  } relayUnlock{ctrPullMutex};
   HTTPClient http;
   http.setConnectTimeout(1500);
   http.setTimeout(1500);
   if (!http.begin(String("http://") + ctrHost + path)) {
     releaseReqBody(request);
-    unlockFor(ctrPullMutex);
     request->send(502, "application/json", "{\"ok\":false,\"error\":\"EVDCTR unreachable\"}");
-    return;
+    return;   // relayUnlock releases the mutex
   }
   http.addHeader("Content-Type", "application/json");
   int code = http.POST((uint8_t *)body, bodyLen);
@@ -207,7 +216,6 @@ inline void handleSourceRelay(AsyncWebServerRequest *request, uint8_t *data,
   releaseReqBody(request);
   String out = code > 0 ? http.getString() : "";
   http.end();
-  unlockFor(ctrPullMutex);
   if (code <= 0) request->send(502, "application/json", "{\"ok\":false,\"error\":\"relay failed\"}");
   else request->send(code, "application/json", out);
 }
@@ -221,7 +229,10 @@ inline void handlePairCtr(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  bool badBody = deserializeJson(in, body, bodyLen) || !in["host"].is<const char*>();
+  // Parse while the buffer is alive (see handleApiConfig): the release frees
+  // the memory `body` points at.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok) || !in["host"].is<const char*>();
   releaseReqBody(request);
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");

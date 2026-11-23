@@ -400,3 +400,222 @@ function calls. Both trees report 0.
 |---|---|---|---|
 | EVDCTR | 1 454 191 B | 8% | 95 452 B (29%) |
 | EVDSTR | 1 238 303 B | 7% | 66 380 B (20%) |
+
+---
+
+## 9. USB audio ported to EspUsbDevice 3.x
+
+`EVDUsb.h` was a stub that called `setVid()`, `begin()` and `connected()` on
+`EspUsbDevice` - methods that never existed. It could not compile, so USB was
+compiled out and the source selector answered 501. It is now a real port.
+
+### The library changed under the old code
+
+EspUsbDevice **3.x is a rewrite**, not an evolution. The old block in
+`srv_EVDUsb.h` targets 2.x, and every one of these is different now:
+
+| 2.x | 3.x |
+|---|---|
+| `CFG_TUD_*` build flags size the buffers | `configure()` sizes them at run time |
+| `device.task()` called from `loop()` | the library runs its own worker task |
+| `audio.begin()` / function `begin()` | only `device.begin()`; a Function's is private |
+| buffers reserved at link time | allocated in `begin()`, freed in `end()` |
+| `ready()` | `started()`, `ready()`, `suspended()`, `speed()` |
+
+Order matters and is enforced: **declare -> `addFormat()` -> `configure()` ->
+`device.begin()`**. `addFormat()` and `configure()` are refused while running,
+and the Feature Unit accessors (`hasVolume`, `getVolumeRange`, ...) are only
+valid after `begin()` has built the audio graph.
+
+### What the port does
+
+- UAC1 **playback** (host -> device), 48 kHz / 16-bit / stereo - the same rate
+  as the I2S path, so the resampler ratio downstream stays valid.
+- 960-frame ring (20 ms), `DropOldest`: for a live input, stale audio is worse
+  than a gap.
+- `addFormat()`'s return value is **checked** - it is false for a shape whose
+  packet would exceed the 1023-byte full-speed limit, which is the one failure
+  that otherwise shows up only as silence.
+- `begin()` failure logs `device.lastErrorName()`, which distinguishes
+  `ESP_ERR_INVALID_SIZE` (endpoints/FIFO do not fit) from
+  `ESP_ERR_INVALID_STATE` (wrong USB mode - needs USB-OTG/TinyUSB).
+- The host's volume/mute is **applied here**: the library reports it as events
+  and never touches the PCM, so without this the Windows slider would be inert.
+  Start at -20 dB, not full scale.
+- `stopServerUsbAudio()` takes the lock with a 500 ms bound and, on timeout,
+  leaves the device up rather than calling `end()` under an in-flight `read()`.
+
+### What the dashboard shows
+
+`/api/state` gained `usbHostVolumeDb`, `usbHostMuted` and `usbError`. The
+capture panel reads `waiting for host (begin_failed)` instead of a bare `-`
+when the source is USB but no PCM is arriving, and shows the host's volume.
+
+### Build
+
+EVDCTR 1 488 411 B (8% of 16 MB), RAM 114 604 B (34%). The USB stack costs
+about 36 KB of flash and 19 KB of static RAM.
+
+**Board settings that matter:** `USBMode=default` (USB-OTG / TinyUSB), *not*
+Hardware CDC and JTAG - the library owns the OTG controller and cannot coexist
+with the core's `USB.begin()`. D- is GPIO19, D+ is GPIO20: the second USB-C
+port on the board, the one not labelled UART.
+
+---
+
+## 10. Third pass — a sceptic reads the fixed code
+
+The first two passes fixed what was broken. This one went back over the result
+and assumed the fixes were wrong too. Nine defects, six of them in code that
+had just been "fixed".
+
+### 10.1 `releaseReqBody()` turned the parse into a use-after-free (both boards)
+
+`accumulateReqBody()` hands back a pointer **into** the buffer that
+`releaseReqBody()` frees. Four handlers did
+
+```c
+bool parsed = !deserializeJson(in, body, bodyLen) && in["host"].is<const char*>();
+releaseReqBody(request);
+```
+
+which is fine (the order of evaluation is left-to-right), but `EVDSTR`'s
+`handleApiConfig` and `handlePairCtr` did
+
+```c
+bool badBody = deserializeJson(in, body, bodyLen) || !in["x"].is<const char*>();
+releaseReqBody(request);
+if (badBody) ...
+```
+
+and five EVDSTR zone handlers did
+
+```c
+bool badBody = (deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["id"].is<...>();
+```
+
+ArduinoJson's `operator!=` against `DeserializationError` is not a member of the
+parse call, so the two halves of that expression have **no sequencing** between
+them and the release is another full-expression later — but the real fault is
+simpler and worse: `releaseReqBody()` frees the memory, and every `in["..."]`
+read afterwards still consults the *document*, not the body, so it survived only
+because nothing in between reallocated. It is a latent heap corruption on every
+zone mutation and every POST /api/config.
+
+**Fixed:** every handler now captures `DeserializationError bodyErr =
+deserializeJson(...)` into a named variable on its own statement, reads the
+field it needs while the body is still alive, and releases after. In EVDSTR the
+field checks moved to their own statement too (`if (!badBody &&
+!in["name"].is<const char*>()) badBody = true;`) so nothing straddles the
+release. `EVDCTR`'s `/api/log/level` had the same shape and now reads
+`in["level"]` before the release as well.
+
+### 10.2 EVDSTR answered a fragmented body by returning without a response
+
+`handlePlayerRegistration` and `handleNodeStats` did `if (index != 0) return;`
+with a comment claiming the node would retry. It cannot: AsyncWebServer sends
+`413` and **aborts the connection** on that segment, so the node sees a socket
+reset, and the second and later segments of the same request are never answered
+at all — a player stalls until its own timeout, every heartbeat.
+
+**Fixed:** one fragment policy for the whole board,
+`bodyIsFragmented()` / `answerFragmentedBody()` in `EVDHelpers.h`: the first
+segment gets the `413` verdict, any later segment is answered `200
+{"dropped":true}` so nothing is left hanging. `handleOtaResult` uses it too
+instead of its own hand-rolled version.
+
+### 10.3 Five zone handlers lost their required-field checks
+
+When `deserializeJson` was moved out of the `badBody` expression, the
+`!in["name"].is<const char*>()` half went with it: a POST of `{}` to
+`/api/zones/create` created a zone named `""`, and `/api/zones/delete` with
+`{}` was a silent no-op that returned `ok`. Both restored, one per handler,
+on their own statement.
+
+### 10.4 EVDSTR's deferred flush could resurrect a deleted zone
+
+`serviceDeferredSettingsFlush()` ran `saveZonesToNVS()` — which takes a
+*snapshot* of the zone table — three seconds after the last settings change, on
+the loop task, while a dashboard request could be mutating the same table on the
+AsyncTCP task. Delete a zone, then a flush that snapshotted a microsecond
+earlier writes it back to NVS: the zone returns after the next reboot. Every
+zone mutation already persists under `zonesMutex` via `saveZonesToNVSLocked()`,
+so the flush now writes only the WiFi/settings block. (This is the same class of
+bug as 6.2, from the other side.)
+
+### 10.5 A relay mutex leaked on one path
+
+`handleSourceRelay()` on EVDSTR took `ctrPullMutex` and released it on four of
+five exits. A fragmented POST calls the handler twice: the first segment
+returned `502` *before* taking the lock, the second took the lock and failed
+`http.begin()`, and that `return` did not unlock. From then on the relay
+answered `503 relay busy` until reboot. Replaced with an RAII guard so no path
+can miss it.
+
+### 10.6 `clientMs: 0` got no clock-sync reply
+
+`in["clientMs"].is<uint32_t>()` is **false** for `0` in ArduinoJson 6: an
+unsigned type rejects any integer it cannot prove non-negative, and a JSON `0`
+is stored as a signed integer. A player that had just booted (`clientMs == 0`)
+was counted as a bad request and got no `sync_resp`, so its very first sync —
+the one that matters — always failed. Now accepts any integer that fits.
+
+`handleClockSyncRequests()` also returned `void` and handled exactly one
+datagram per call while `loop()` slept; a fleet of nodes plus any stall (an OTA
+flash write is ~1 s of no loop()) overflowed the socket's RX buffer and lwIP
+dropped the rest silently. It now returns "a packet was handled" and `loop()`
+drains up to four per pass with a 1 ms sleep.
+
+### 10.7 DLNA skipped a hard-coded 44 bytes of WAV header
+
+Every WAV written by an encoder with metadata puts `LIST`/`fact`/`bext` chunks
+between `fmt ` and `data`, so the real header is 60–400 bytes, not 44. The
+fetch task skipped 44 and fed the rest of the *header* into `rawQueue` as PCM:
+a burst of noise at the start of every DLNA track. It also never read the
+sample rate, so a 44.1 kHz file was resampled as if it were 48 kHz (audible
+pitch error) and mono files were read as interleaved stereo (wrong speed and
+garbage).
+
+**Fixed:** `parseWavHeader()` walks the chunk list (`fmt `, then any number of
+other chunks, then `data`), returns the true skip offset, and accepts only
+16-bit PCM or `WAVE_FORMAT_EXTENSIBLE` with 16 bits at 8–192 kHz. It sets
+`g_sourceSampleRate` and resets the rate estimator, so a 44.1 kHz file is
+resampled from 44.1 kHz. A header that straddles two socket segments is
+finished off (`headerSkipRemaining`) instead of aborting the stream. Mono is
+duplicated into L/R, because everything downstream is hard-wired to stereo.
+
+### 10.8 `ResamplerToOpusRate::process()` read out of bounds on a 1-frame chunk
+
+The cubic needs samples `i-1` … `i+2`. With `inFrames == 1` the loop condition
+`pos_ < inFrames - 1` is `pos_ < 0` and never runs, but the priming block then
+reads `in[1]`, which for a mono-in-a-stereo-buffer chunk is one sample past the
+end. Guarded with `if (inFrames < 2) return 0;`.
+
+### 10.9 Small ones
+
+- `handleEncoderRecreate()`'s stale-frame skip in `audioEncodeTask` dropped
+  forever with no log if the producer's frame size stopped matching the
+  encoder's (a stuck `g_opusFrameSamples`): the link stayed "up" and the
+  players were silent with nothing in the log. Now counted
+  (`statOpusDropped`) and logged every 2 s.
+- Both boards' factory-reset path called `ESP.restart()` with a live
+  `PrefsGuard`: `restart()` never returns, so the destructor never ran and the
+  namespace was never closed or committed. Scoped so the guard dies first.
+- `chk5.py` (duplicate-definition scan) reported six false positives in
+  `EVDUsb.h`, because it read both halves of an `#if`/`#else`. It now strips the
+  inactive branch; both trees report 0 again.
+
+### Build after the third pass
+
+| | flash | RAM |
+|---|---|---|
+| EVDCTR | 1 489 295 B (8% of 16 MB) | 114 636 B (34%) |
+| EVDSTR | 1 270 427 B (7% of 16 MB) | 85 532 B (26%) |
+
+EVDSTR's RAM grew by 19 KB: `bodyIsFragmented()`/`answerFragmentedBody()` are
+`inline` in a header included before `EVDPlayers.h`, which is where they had to
+go for the include order to work.
+
+Still hardware-only, unchanged from §9: the pin link between two real boards,
+Opus at runtime, USB enumeration, and discovery on a LAN that does not isolate
+clients.

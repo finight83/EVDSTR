@@ -234,7 +234,7 @@ inline void setup_udp_transport();
 inline void udpSendTask(void *param);
 inline void sendCtrlToSubscriber(const String &ip, const String &json);
 inline void sendAuthoritativeTimeSync();
-inline void handleClockSyncRequests();
+inline bool handleClockSyncRequests();
 inline void pruneStaleSubscribers(unsigned long now);
 inline void loadZonesFromNVS();
 inline void saveZonesToNVS();

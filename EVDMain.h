@@ -38,12 +38,17 @@ inline void createSyncPrimitives() {
   }
 }
 
+// ---- Deferred NVS flush ----------------------------------------------------
+// Zones are NOT saved here. Every zone mutation already writes the table under
+// zonesMutex (saveZonesToNVSLocked), and this flush runs on the loop task while
+// a dashboard request runs on the AsyncTCP task: taking a snapshot and writing
+// it 3 s later can persist a table that a create/delete has since changed,
+// i.e. resurrect a deleted zone. Only the WiFi/settings block is deferred.
 inline void serviceDeferredSettingsFlush() {
   if (!settingsDirty) return;
   if (millis() - settingsDirtySince < NVM_SAVE_DELAY_MS) return;
   settingsDirty = false;
   saveWiFiSettings();
-  saveZonesToNVS();
 }
 
 inline void serviceFactoryResetPin() {
@@ -53,8 +58,14 @@ inline void serviceFactoryResetPin() {
     if (heldSince == 0) heldSince = millis();
     if (millis() - heldSince > FACTORY_RESET_HOLD_MS) {
       LOGW("factory reset: clearing NVS and restarting");
-      PrefsGuard g("evdstr", false);
-      if (g.ok) g.prefs.clear();
+      // Scope the guard: ESP.restart() does not return, so a PrefsGuard still
+      // in scope would never release prefsMutex or close the NVS handle. The
+      // restart is a last resort anyway, but the clear must be committed
+      // before it, which only end() (the destructor) guarantees.
+      {
+        PrefsGuard g("evdstr", false);
+        if (g.ok) g.prefs.clear();
+      }
       delay(300);
       ESP.restart();
     }
@@ -106,8 +117,18 @@ void setup() {
 void loop() {
   serviceFactoryResetPin();
   serviceDiscovery();
-  handleClockSyncRequests();   // polled here: one packet per node per few s
   serviceDeferredSettingsFlush();
+
+  // Clock sync: a request/response exchange, NOT a poll.
+  // handleClockSyncRequests() parses at most one datagram per call and replies
+  // to the node's source port. Draining the whole backlog per pass (bounded)
+  // matters: one call per loop() iteration with a 5 ms sleep could not keep up
+  // with a fleet of nodes, the socket's RX buffer filled during any stall (an
+  // OTA flash write, a deferred NVS flush), and lwIP dropped the overflow with
+  // no trace - which showed up only as nodes that never locked their clock.
+  for (int i = 0; i < 4; ++i) {
+    if (!handleClockSyncRequests()) break;   // true = a packet was handled
+  }
 
   // The encoder mirror is an HTTP GET, and HTTPClient is not re-entrant. This
   // runs on the loop task (core 0, pri 1) every 2 s; the relay in EVDRoutes.h
@@ -117,7 +138,5 @@ void loop() {
   // settings flush and clock sync; a blocking GET with a 1.5 s timeout every
   // 2 s (EVDCTR unreachable) stalled all three. The pull runs in its own task,
   // started in setup().
-  (void)0;
-
-  delay(5);
+  delay(1);
 }

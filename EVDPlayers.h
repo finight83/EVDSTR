@@ -219,10 +219,8 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
   // fragmented body must not be parsed chunk-wise: the first partial chunk
   // would omit audioProtocolVersion and the node would be marked
   // incompatible, which silences it. Reject and let it retry.
-  if (index != 0 || len != total) {
-    if (index != 0) return;
-    request->send(413, "application/json",
-                  "{\"ok\":false,\"error\":\"register body fragmented; retry\"}");
+  if (bodyIsFragmented(index, len, total)) {
+    answerFragmentedBody(request, index, len, total);
     return;
   }
   String ip = request->client()->remoteIP().toString();
@@ -382,9 +380,8 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
 // ---- node stats ------------------------------------------------------------
 inline void handleNodeStats(AsyncWebServerRequest *request, uint8_t *data,
                             size_t len, size_t index, size_t total) {
-  if (index != 0 || len != total) {
-    if (index != 0) return;
-    request->send(413, "application/json", "{\"ok\":false,\"error\":\"fragmented\"}");
+  if (bodyIsFragmented(index, len, total)) {
+    answerFragmentedBody(request, index, len, total);
     return;
   }
   String ip = request->client()->remoteIP().toString();
@@ -409,11 +406,13 @@ inline void handleNodeStats(AsyncWebServerRequest *request, uint8_t *data,
 
 inline void handleOtaResult(AsyncWebServerRequest *request, uint8_t *data,
                             size_t len, size_t index, size_t total) {
-  // A player reports one small JSON object. Parse only the first segment: the
-  // old code returned early on every later segment without ever sending a
-  // response, so a fragmented body left the player's request hanging until its
-  // own timeout.
-  if (index != 0) { request->send(200, "application/json", "{\"ok\":true}"); return; }
+  // A player reports one small JSON object. A fragmented body is answered on
+  // every segment: returning early on a later segment without a response left
+  // the player's request hanging until its own timeout.
+  if (bodyIsFragmented(index, len, total)) {
+    answerFragmentedBody(request, index, len, total);
+    return;
+  }
   String ip = request->client()->remoteIP().toString();
   bool success = false;
   if (len > 0 && data) {
@@ -500,13 +499,19 @@ inline void handleZonesCreate(AsyncWebServerRequest *request, uint8_t *data,
   DynamicJsonDocument in(256);
   // Parse while the body buffer is still alive, then release it: the
   // document has its own copy, and nothing below reads body.
-  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["name"].is<const char*>());
-  releaseReqBody(request);
+  //
+  // The parse result MUST be captured BEFORE releaseReqBody(): the old
+  // form parsed `body` and read `in["..."]` in the same expression as
+  // the release, so `badBody` was false for a truncated object (which
+  // ArduinoJson accepts) and every later in["..."] read was empty.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok);
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
   String name = in["name"].as<String>();
+
   if (!isValidZoneName(name)) {
     request->send(400, "application/json",
                   "{\"ok\":false,\"error\":\"zone name: letters, digits, space, - _\"}");
@@ -532,14 +537,21 @@ inline void handleZonesDelete(AsyncWebServerRequest *request, uint8_t *data,
   DynamicJsonDocument in(256);
   // Parse while the body buffer is still alive, then release it: the
   // document has its own copy, and nothing below reads body.
-  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["id"].is<const char*>());
-  releaseReqBody(request);
+  //
+  // The parse result MUST be captured BEFORE releaseReqBody(): the old
+  // form parsed `body` and read `in["..."]` in the same expression as
+  // the release, so `badBody` was false for a truncated object (which
+  // ArduinoJson accepts) and every later in["..."] read was empty.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok);
+  if (!badBody && !in["name"].is<const char*>()) badBody = true;
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
   String id = in["id"].as<String>();
   if (id == MAIN_ZONE_ID) {
+
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"Main Room cannot be deleted\"}");
     return;
   }
@@ -560,9 +572,16 @@ inline void handleZonesMove(AsyncWebServerRequest *request, uint8_t *data,
   if (!accumulateReqBody(request, data, len, index, total, 512,
                          "{\"ok\":false,\"error\":\"too large\"}", body, bodyLen)) return;
   DynamicJsonDocument in(256);
-  // Parse while the body buffer is still alive, then release it.
-  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["ip"].is<const char*>() ||
-                  !in["zone"].is<const char*>());
+  // Parse while the body buffer is still alive, then release it: the
+  // document has its own copy, and nothing below reads body.
+  //
+  // The parse result MUST be captured BEFORE releaseReqBody(): the old
+  // form parsed `body` and read `in["..."]` in the same expression as
+  // the release, so `badBody` was false for a truncated object (which
+  // ArduinoJson accepts) and every later in["..."] read was empty.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok);
+  if (!badBody && (!in["ip"].is<const char*>() || !in["zone"].is<const char*>())) badBody = true;
   releaseReqBody(request);
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
@@ -601,14 +620,21 @@ inline void handleZonesConfig(AsyncWebServerRequest *request, uint8_t *data,
   DynamicJsonDocument in(256);
   // Parse while the body buffer is still alive, then release it: the
   // document has its own copy, and nothing below reads body.
-  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["id"].is<const char*>());
-  releaseReqBody(request);
+  //
+  // The parse result MUST be captured BEFORE releaseReqBody(): the old
+  // form parsed `body` and read `in["..."]` in the same expression as
+  // the release, so `badBody` was false for a truncated object (which
+  // ArduinoJson accepts) and every later in["..."] read was empty.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok);
+  if (!badBody && !in["id"].is<const char*>()) badBody = true;
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
   }
   String id = in["id"].as<String>();
   int  vol  = in["volume"] | -1;
+
   bool muteSet = in["muted"].is<bool>();
   bool mute = in["muted"] | false;
 
@@ -644,8 +670,14 @@ inline void handleZonesRemoveNode(AsyncWebServerRequest *request, uint8_t *data,
   DynamicJsonDocument in(256);
   // Parse while the body buffer is still alive, then release it: the
   // document has its own copy, and nothing below reads body.
-  bool badBody = ((deserializeJson(in, body, bodyLen) != DeserializationError::Ok) || !in["ip"].is<const char*>());
-  releaseReqBody(request);
+  //
+  // The parse result MUST be captured BEFORE releaseReqBody(): the old
+  // form parsed `body` and read `in["..."]` in the same expression as
+  // the release, so `badBody` was false for a truncated object (which
+  // ArduinoJson accepts) and every later in["..."] read was empty.
+  DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
+  bool badBody = (bodyErr != DeserializationError::Ok);
+  if (!badBody && !in["ip"].is<const char*>()) badBody = true;
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
