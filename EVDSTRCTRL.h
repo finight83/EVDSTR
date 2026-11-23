@@ -41,6 +41,9 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
   .muted{color:var(--muted)}
   .row{display:flex;gap:10px;align-items:center}
   .row>*{flex:1 1 auto}
+  #err{display:none;margin:0 22px 14px;padding:10px 12px;border-radius:10px;
+       border:1px solid #5b1f1f;background:#1a0d0d;color:#ffb9b9;font-size:.85rem}
+  #err.on{display:block}
 </style>
 </head>
 <body>
@@ -52,6 +55,8 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
   <span class="pill" id="p-link">link ?</span>
   <span class="pill" id="p-ver">-</span>
 </header>
+
+<div id="err"></div>
 
 <main>
   <div class="grid">
@@ -93,14 +98,34 @@ async function j(url, opt) {
 const post = (url, body) => j(url, { method: 'POST',
   headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const kv = o => Object.entries(o)
-  .map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('');
+  .map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v ?? '-'}</span></div>`).join('');
+
+// Every command used to fire and forget: a refused pairing or a board that
+// restarted mid-request left the page unchanged and the operator guessing.
+let errTimer = null;
+function err(e) {
+  const box = $('#err');
+  if (!box) { console.warn(e); return; }
+  box.textContent = (e && e.message) ? e.message : String(e);
+  box.className = 'on';
+  clearTimeout(errTimer);
+  errTimer = setTimeout(() => { box.className = ''; }, 8000);
+}
+const txt = (url, body) => post(url, body)
+  .then(r => { if (r && r.ok === false) err(r.error || 'request failed'); })
+  .catch(err);
 
 async function tick() {
   const s = await j('/api/state');
-  if (s.raw) return;
+  if (!s || s.raw) {
+    $('#p-link').textContent = 'no answer';
+    $('#p-link').className = 'pill bad';
+    return;
+  }
   $('#p-ip').textContent = s.ip + ' (' + s.rssi + ' dBm)';
   $('#p-ver').textContent = 'STR ' + s.version;
-  $('#p-subs').textContent = s.subscribers + ' player' + (s.subscribers === 1 ? '' : 's');
+  const n = typeof s.subscribers === 'number' ? s.subscribers : 0;
+  $('#p-subs').textContent = n + ' player' + (n === 1 ? '' : 's');
   // 400 ms, the same threshold audioLinkTask uses (LINK_STALE_DROP_MS) and the
   // same one /api/state reports. A dashboard that disagrees with the audio task
   // about whether the link is alive is worse than no indicator.
@@ -108,14 +133,15 @@ async function tick() {
   $('#p-link').textContent = linkOk ? 'link ok' : 'link idle ' + s.linkGapMs + ' ms';
   $('#p-link').className = 'pill ' + (linkOk ? 'ok' : 'bad');
 
+  const kb = n => (typeof n === 'number' ? (n / 1000) + ' kHz' : '-');
   $('#stream').innerHTML = kv({
     Subscribers: s.subscribers,
-    'Queue': s.queueDepth + ' / ' + s.queueTarget,
-    'Pacer late': s.pacerLateMs + ' ms',
+    'Queue': (s.queueDepth ?? '-') + ' / ' + (s.queueTarget ?? '-'),
+    'Pacer late': (s.pacerLateMs ?? '-') + ' ms',
     'Frames sent': s.framesSent,
     'Frames dropped': s.framesDropped,
-    Encoder: (s.opusSampleRate / 1000) + ' kHz',
-    Buffer: s.bufferMs + ' ms',
+    Encoder: kb(s.opusSampleRate),
+    Buffer: (s.bufferMs ?? '-') + ' ms',
     Mode: s.mode
   });
   $('#link').innerHTML = kv({
@@ -123,11 +149,19 @@ async function tick() {
     'Last gap': s.linkGapMs + ' ms',
     Controller: s.ctr || ('searching\u2026 ' + (s.discoveryProbes ?? 0) + ' probes sent')
   });
-  if (!$('#vol').matches(':active')) { $('#vol').value = s.volume; $('#volv').textContent = s.volume; }
-  if (!$('#buf').matches(':active')) { $('#buf').value = s.bufferMs; $('#bufv').textContent = s.bufferMs + ' ms'; }
-  if (!document.activeElement || document.activeElement.id !== 'ctrhost') $('#ctrhost').value = s.ctr || '';
+  // A range under the finger must not be written back, and a board that has
+  // not published a field yet must not blank the control with undefined.
+  const focusId = document.activeElement ? document.activeElement.id : '';
+  const idle = (sel, id) => { const el = $(sel); return el && !el.matches(':active') && focusId !== id; };
+  if (idle('#vol', 'vol') && typeof s.volume === 'number') {
+    $('#vol').value = s.volume; $('#volv').textContent = s.volume;
+  }
+  if (idle('#buf', 'buf') && typeof s.bufferMs === 'number') {
+    $('#buf').value = s.bufferMs; $('#bufv').textContent = s.bufferMs + ' ms';
+  }
+  if (focusId !== 'ctrhost') $('#ctrhost').value = s.ctr || '';
 
-  const p = await j('/api/players');
+  const p = await j('/api/players').catch(() => null);
   if (Array.isArray(p)) {
     $('#players tbody').innerHTML = p.map(x =>
       `<tr><td>${x.name}</td><td>${x.ip}</td><td>${x.version || '-'}</td>` +
@@ -135,25 +169,37 @@ async function tick() {
       `<td>${x.compatible ? 'ok' : (x.reason || 'no')}</td></tr>`).join('')
       || '<tr><td colspan="6" class="muted">no players yet</td></tr>';
   }
-  const z = await j('/api/zones');
+  const z = await j('/api/zones').catch(() => null);
   if (Array.isArray(z)) $('#zones').textContent = JSON.stringify(z, null, 1);
 }
 
 $('#vol').oninput = e => $('#volv').textContent = e.target.value;
-$('#vol').onchange = e => post('/api/config', { masterVolume: +e.target.value });
+$('#vol').onchange = e => txt('/api/config', { masterVolume: +e.target.value });
 $('#mute').onclick = async () => {
-  const s = await j('/api/state');
-  post('/api/config', { masterMuted: !s.muted });
+  try {
+    const s = await j('/api/state');
+    if (s.raw) { err('board did not answer'); return; }
+    txt('/api/config', { masterMuted: !s.muted });
+  } catch (e) { err(e); }
 };
 $('#buf').oninput = e => $('#bufv').textContent = e.target.value + ' ms';
-$('#bufapply').onclick = () => post('/api/config', { audioBufferMs: +$('#buf').value });
+$('#bufapply').onclick = () => txt('/api/config', { audioBufferMs: +$('#buf').value });
 $('#pair').onclick = async () => {
-  const r = await post('/api/link/pair', { host: $('#ctrhost').value.trim() });
-  $('#pairstat').textContent = r.ok ? 'Paired with ' + r.host : (r.error || 'failed');
+  const host = $('#ctrhost').value.trim();
+  if (!host) { $('#pairstat').textContent = 'enter the controller address first'; return; }
+  $('#pairstat').textContent = 'checking ' + host + '\u2026';
+  try {
+    const r = await post('/api/link/pair', { host });
+    $('#pairstat').textContent = r.ok ? 'Paired with ' + r.host : (r.error || 'failed');
+    if (!r.ok) err('pairing failed: ' + (r.error || 'no answer'));
+  } catch (e) { $('#pairstat').textContent = 'failed'; err(e); }
 };
 
-tick();
-setInterval(tick, 2000);
+// Start the pollers last, and catch what they return: an unhandled rejection
+// (board rebooting after an OTA) used to freeze the page with nothing in the
+// console to say why.
+tick().catch(e => console.warn('startup', e));
+setInterval(() => { tick().catch(e => console.warn('tick', e)); }, 2000);
 </script>
 </body>
 </html>
