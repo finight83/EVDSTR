@@ -79,8 +79,14 @@ inline void audioLinkTask(void *param) {
     uint32_t rate = 0;
     bool silence = false;
 
+    // [link-irq-wait-100ms] This used to ask for a 2000 us wait per call. With
+    // EVDCTR absent the call returned in 2 ms and the loop re-armed, so the
+    // task never slept - the pin poll was a busy-wait and it starved the Idle
+    // task on core 0 until the watchdog aborted the board. The wait is now a
+    // real block on the IRQ semaphore, so it can be long: 100 ms per attempt
+    // means a dead producer costs one tick per call instead of a spin.
     bool got = linkReceiveFrame(gLinkRxPkt.data, MAX_OPUS_PACKET_LEN, len,
-                                samples, channels, rate, silence, 2000);
+                                samples, channels, rate, silence, 100000);
     uint32_t now = millis();
     loops++;
 

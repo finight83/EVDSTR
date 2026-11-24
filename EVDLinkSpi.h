@@ -54,6 +54,17 @@
 static uint8_t DMA_ATTR gLinkRxBuf[LINK_HDR_BYTES + LINK_MAX_PAYLOAD]
     __attribute__((aligned(4)));
 
+// [link-irq-semaphore] CTR holds IRQ high for the whole frame. Polling it in
+// a `while` loop at priority 6 starved the Idle task on core 0 - the task
+// watchdog then aborted the board after 5 s with no EVDCTR connected. The ISR
+// now gives this semaphore and the task BLOCKS on it instead of spinning.
+static SemaphoreHandle_t gLinkIrqSem = nullptr;
+static void IRAM_ATTR linkIrqIsr(void *) {
+  BaseType_t woken = pdFALSE;
+  if (gLinkIrqSem) xSemaphoreGiveFromISR(gLinkIrqSem, &woken);
+  if (woken) portYIELD_FROM_ISR();
+}
+
 static bool gLinkUp = false;
 static spi_slave_transaction_t gLinkTrans;
 static bool          gLinkArmed         = false;
@@ -100,6 +111,17 @@ inline bool setupLinkSpi() {
   if (spi_slave_initialize(LINK_SPI_HOST, &bus, &slv, SPI_DMA_CH_AUTO) != ESP_OK) {
     return false;
   }
+
+  // [link-irq-semaphore] Armed before the interrupt, and before any task can
+  // call linkReceiveFrame(), so the first frame cannot be missed.
+  if (!gLinkIrqSem) gLinkIrqSem = xSemaphoreCreateBinary();
+  if (!gLinkIrqSem) return false;
+  gpio_set_intr_type((gpio_num_t)PIN_LINK_IRQ, GPIO_INTR_POSEDGE);
+  if (gpio_isr_handler_add((gpio_num_t)PIN_LINK_IRQ, linkIrqIsr, nullptr) != ESP_OK) {
+    return false;
+  }
+  gpio_intr_enable((gpio_num_t)PIN_LINK_IRQ);
+
   gLinkUp = true;
   return true;
 }
@@ -166,13 +188,23 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
     return false;
   }
 
-  // CTR drives IRQ high for the duration of a frame. Waiting for it here
-  // keeps the caller's poll cheap and lets a dead producer return promptly.
-  const uint32_t t0 = micros();
-  while (gpio_get_level((gpio_num_t)PIN_LINK_IRQ) == 0) {
-    if ((uint32_t)(micros() - t0) > waitUs) return false;
+  // [link-irq-semaphore] Block until CTR raises IRQ, instead of spinning on
+  // the pin. A semaphore wait yields the core, so the Idle task runs and the
+  // task watchdog stays fed even with no EVDCTR attached. `waitUs` is the
+  // bound; it is a real wait now, not a busy loop.
+  if (gLinkIrqSem) {
+    if (xSemaphoreTake(gLinkIrqSem, pdMS_TO_TICKS(waitUs / 1000 + 1)) != pdTRUE)
+      return false;
+  } else if (gpio_get_level((gpio_num_t)PIN_LINK_IRQ) == 0) {
+    // No semaphore (setup has not run yet): fall back to the pin, but never
+    // spin for more than one tick.
+    vTaskDelay(1);
+    if (gpio_get_level((gpio_num_t)PIN_LINK_IRQ) == 0) return false;
   }
 
+  // The producer is driving IRQ, so the transaction should complete shortly.
+  // portMAX_DELAY would be a lie here - a producer that died mid-frame would
+  // block this task forever - so keep the tick bound.
   spi_slave_transaction_t *done = nullptr;
   esp_err_t rc = spi_slave_get_trans_result(LINK_SPI_HOST, &done,
                                             pdMS_TO_TICKS(10));
