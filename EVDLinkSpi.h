@@ -110,6 +110,26 @@ inline void logLinkPeerState(const char *when) {
                     : "no partner signal yet (EVDCTR off, unwired, or silent)");
 }
 
+// Queue the single transaction the slave driver accepts. Kept separate so
+// setup can arm it once and report whether the peripheral accepted it.
+//
+// [link-arm-timeout] spi_slave_queue_trans() with a ZERO timeout fails when
+// the driver's one queue slot is still busy. The old receive path used 0 and
+// never set gLinkArmed on failure, so one busy moment disabled the link for
+// good - silently. 20 ms is longer than a frame period.
+inline bool linkArm() {
+  if (gLinkArmed) return true;
+  gLinkTrans.length    = LINK_WIRE_BYTES * 8;
+  gLinkTrans.tx_buffer = nullptr;
+  gLinkTrans.rx_buffer = gLinkRxBuf;
+  if (spi_slave_queue_trans(LINK_SPI_HOST, &gLinkTrans,
+                            pdMS_TO_TICKS(20)) != ESP_OK) {
+    return false;
+  }
+  gLinkArmed = true;
+  return true;
+}
+
 // ---- Frame receive ----------------------------------------------------------
 // The ESP-IDF SPI slave driver only accepts bytes while a transaction is
 // queued. spi_slave_transmit() queues one, blocks for it, and unqueues it - so
@@ -135,15 +155,9 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
   // Re-arm the permanently-queued transaction. CTR clocks the whole frame -
   // header and payload - in one CS assertion, so the length is always the
   // maximum and the header tells us how much of it is real.
-  if (!gLinkArmed) {
-    gLinkTrans.length    = LINK_WIRE_BYTES * 8;
-    gLinkTrans.tx_buffer = nullptr;
-    gLinkTrans.rx_buffer = gLinkRxBuf;
-    if (spi_slave_queue_trans(LINK_SPI_HOST, &gLinkTrans, 0) != ESP_OK) {
-      gLinkRxTimeouts++;
-      return false;
-    }
-    gLinkArmed = true;
+  if (!gLinkArmed && !linkArm()) {
+    gLinkRxTimeouts++;
+    return false;
   }
 
   // CTR drives IRQ high for the duration of a frame. Waiting for it here
@@ -181,9 +195,12 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
   const uint32_t payloadLen = linkPayloadLenFromHeader(h);
 
   // trans_len is the number of BITS actually clocked. A frame the producer
-  // aborted mid-way arrives short and must not be handed on as audio.
+  // aborted mid-way arrives short and must not be handed on as audio - but the
+  // test is "enough for the header plus the payload the header declares", not
+  // "all LINK_WIRE_BYTES": a producer that clocks only what it has is legal,
+  // and demanding the padding would reject a perfectly good frame.
   const uint32_t clockedBytes = (uint32_t)(done->trans_len / 8);
-  if (clockedBytes < LINK_WIRE_BYTES) {
+  if (clockedBytes < LINK_HDR_BYTES + payloadLen) {
     gLinkBadHeaders++;
     return false;
   }

@@ -39,8 +39,23 @@ volatile uint32_t gLastLinkedRate     = OPUS_SAMPLE_RATE_DEFAULT;
 inline void audioLinkTask(void *param) {
   (void)param;
   LOGI("audioLinkTask started on core %d", xPortGetCoreID());
+  Serial.printf("[LINK] audioLink running on core %d, %u B rx buffer\n",
+                (int)xPortGetCoreID(), (unsigned)sizeof(OpusPacket));
+  // [link-arm-at-start] Arm the first transaction here, before the loop, and
+  // say whether it worked. The receive path arms lazily; if that first arm
+  // fails there is nothing to receive into and the task would spin silently.
+  Serial.printf("[LINK] arming first SPI transaction...\n");
+  if (!linkArm()) {
+    Serial.printf("[LINK] ARM FAILED - the SPI slave driver rejected the "
+                  "transaction; no audio can arrive\n");
+  } else {
+    Serial.printf("[LINK] armed, waiting for EVDCTR on IRQ(GPIO%d)\n",
+                  PIN_LINK_IRQ);
+  }
   static OpusPacket pkt;
   static uint32_t lastRxMs = 0;
+  static uint32_t loops = 0;
+  static uint32_t lastBeat = 0;
 
   for (;;) {
     uint32_t len = 0;
@@ -51,6 +66,23 @@ inline void audioLinkTask(void *param) {
     bool got = linkReceiveFrame(pkt.data, MAX_OPUS_PACKET_LEN, len,
                                 samples, channels, rate, silence, 2000);
     uint32_t now = millis();
+    loops++;
+
+    // [link-alive-beat] If this line never appears the task is not looping at
+    // all (blocked in the SPI driver or killed); if it appears with linkIn=0
+    // the loop is fine and EVDCTR is simply not clocking frames. Those are two
+    // completely different faults and the old log could not tell them apart.
+    if (now - lastBeat > 5000) {
+      lastBeat = now;
+      Serial.printf("[LINK] loops %lu | frames in %lu | bad %lu | timeouts %lu "
+                    "| silence %lu | gap %lu ms | irq %d\n",
+                    (unsigned long)loops, (unsigned long)statLinkIn,
+                    (unsigned long)linkBadHeaders(),
+                    (unsigned long)linkRxTimeouts(),
+                    (unsigned long)statLinkSilence,
+                    (unsigned long)statLinkGapMs,
+                    gpio_get_level((gpio_num_t)PIN_LINK_IRQ));
+    }
 
     if (!got) {
       // Distinguish "no frame this poll" from "the producer has stopped".
@@ -155,17 +187,25 @@ inline void setup_queues_and_tasks() {
     return;
   }
 
+  // [task-create-progress] Every creation prints an unconditional line BEFORE
+  // it runs. The first bring-up died with TASK_WDT right after "audioLinkTask
+  // started on core 0" and no further output, which left no way to tell
+  // whether the task creation failed, the task blocked, or the next creation
+  // hung. Serial.printf, not LOGI: LOGI can be filtered by gSerialLogLevel.
   BaseType_t rc;
+  Serial.printf("[TASK] creating audioLink (4096 B, pri 6, core 0)...\n");
   rc = xTaskCreatePinnedToCore(audioLinkTask, "audioLink", 4096, nullptr, 6,
                                nullptr, 0);
   if (rc != pdPASS) { LOGE("FAILED to create audioLinkTask (%d)", (int)rc);
                       Serial.printf("[TASK] audioLink FAILED (%d)\n", (int)rc); }
 
+  Serial.printf("[TASK] creating udpSend (8192 B, pri 3, core 0)...\n");
   rc = xTaskCreatePinnedToCore(udpSendTask, "udpSend", 8192, nullptr, 3,
                                nullptr, 0);
   if (rc != pdPASS) { LOGE("FAILED to create udpSendTask (%d)", (int)rc);
                       Serial.printf("[TASK] udpSend  FAILED (%d)\n", (int)rc); }
 
+  Serial.printf("[TASK] creating players (8192 B, pri 3, core 1)...\n");
   rc = xTaskCreatePinnedToCore(playerTask, "players", 8192, nullptr, 3,
                                nullptr, 1);
   if (rc != pdPASS) { LOGE("FAILED to create playerTask (%d)", (int)rc);
@@ -173,6 +213,7 @@ inline void setup_queues_and_tasks() {
 
   // The encoder mirror is an HTTP client, not audio: it lives on core 0 at a
   // low priority so a slow EVDCTR can never delay the link or the pacer.
+  Serial.printf("[TASK] creating mirror (4096 B, pri 1, core 0)...\n");
   rc = xTaskCreatePinnedToCore(encoderMirrorTask, "mirror", 4096, nullptr, 1,
                                nullptr, 0);
   if (rc != pdPASS) { LOGE("FAILED to create encoderMirrorTask (%d)", (int)rc);
