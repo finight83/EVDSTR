@@ -218,9 +218,13 @@ void setup() {
   printBootBanner("boot complete");
   gLastBootWasCrash = false;
   markBootComplete();
-  Serial.printf("[BOOT] resources     : heap %u KB free, psram %u KB free, "
-                "sketch %u KB of %u KB\n",
+  // maxAlloc is the number that matters after a heap crash: "281 KB free"
+  // is useless if the largest single free block is 4 KB, because the next
+  // allocation of a 1 KB frame plus a String copy fails inside the allocator.
+  Serial.printf("[BOOT] resources     : heap %u KB free (largest block %u KB), "
+                "psram %u KB free, sketch %u KB of %u KB\n",
                 (unsigned)(ESP.getFreeHeap() / 1024),
+                (unsigned)(ESP.getMaxAllocHeap() / 1024),
                 (unsigned)(ESP.getFreePsram() / 1024),
                 (unsigned)(ESP.getSketchSize() / 1024),
                 (unsigned)(ESP.getFreeSketchSpace() / 1024));

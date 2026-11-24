@@ -38,6 +38,10 @@ uint32_t statLinkGapMs       = 0;
 uint32_t gWireSeq            = 1;
 uint32_t gLastLinkedRate     = OPUS_SAMPLE_RATE_DEFAULT;
 
+// The one receive buffer. File scope, not function-local: see
+// [link-rx-no-big-frame] in audioLinkTask.
+OpusPacket gLinkRxPkt;
+
 // ---- audioLinkTask (core 0) ------------------------------------------------
 // Polls the link, validates, stamps and queues. The wait is short (2 ms) so a
 // frame is never more than one poll interval late; the task blocks on the GPIO
@@ -58,7 +62,13 @@ inline void audioLinkTask(void *param) {
     Serial.printf("[LINK] armed, waiting for EVDCTR on IRQ(GPIO%d)\n",
                   PIN_LINK_IRQ);
   }
-  static OpusPacket pkt;
+  // [link-rx-no-big-frame] This used to be a function-local `static
+  // OpusPacket pkt`, i.e. a 1040-byte object. Static storage does not consume
+  // task stack, but the compiler still needs the destination address live and
+  // the receive path is the hottest code on a 4096-byte stack - and the first
+  // crash after boot was inside the heap allocator while this task was the
+  // running one. The buffer now lives at file scope, allocated once, so no
+  // amount of inlining can put it on the stack.
   static uint32_t lastRxMs = 0;
   static uint32_t loops = 0;
   static uint32_t lastBeat = 0;
@@ -69,7 +79,7 @@ inline void audioLinkTask(void *param) {
     uint32_t rate = 0;
     bool silence = false;
 
-    bool got = linkReceiveFrame(pkt.data, MAX_OPUS_PACKET_LEN, len,
+    bool got = linkReceiveFrame(gLinkRxPkt.data, MAX_OPUS_PACKET_LEN, len,
                                 samples, channels, rate, silence, 2000);
     uint32_t now = millis();
     loops++;
@@ -80,14 +90,19 @@ inline void audioLinkTask(void *param) {
     // completely different faults and the old log could not tell them apart.
     if (now - lastBeat > 5000) {
       lastBeat = now;
+      // Stack high-water: the smallest free stack seen since the task
+      // started, in bytes. If this is near zero the task is about to
+      // overflow, which corrupts the heap next to it rather than crashing
+      // here - the first crash after boot looked exactly like that.
       Serial.printf("[LINK] loops %lu | frames in %lu | bad %lu | timeouts %lu "
-                    "| silence %lu | gap %lu ms | irq %d\n",
+                    "| silence %lu | gap %lu ms | irq %d | stack free %u B\n",
                     (unsigned long)loops, (unsigned long)statLinkIn,
                     (unsigned long)linkBadHeaders(),
                     (unsigned long)linkRxTimeouts(),
                     (unsigned long)statLinkSilence,
                     (unsigned long)statLinkGapMs,
-                    gpio_get_level((gpio_num_t)PIN_LINK_IRQ));
+                    gpio_get_level((gpio_num_t)PIN_LINK_IRQ),
+                    (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     }
 
     if (!got) {
@@ -145,12 +160,12 @@ inline void audioLinkTask(void *param) {
     // Stamp on THIS board's clock. The two chips boot independently, so the
     // producer's millis() means nothing here; the players only need a
     // monotonic capture timeline, which is exactly what they get.
-    pkt.len     = (int)len;
-    pkt.seq     = gWireSeq++;
-    pkt.captured_ms = now;
-    pkt.samples = samples;
+    gLinkRxPkt.len     = (int)len;
+    gLinkRxPkt.seq     = gWireSeq++;
+    gLinkRxPkt.captured_ms = now;
+    gLinkRxPkt.samples = samples;
 
-    if (xQueueSend(opusQueue, &pkt, 0) != pdTRUE) {
+    if (xQueueSend(opusQueue, &gLinkRxPkt, 0) != pdTRUE) {
       statOpusDropped++;
       continue;
     }
@@ -206,7 +221,9 @@ inline void setup_queues_and_tasks() {
   // hung. Serial.printf, not LOGI: LOGI can be filtered by gSerialLogLevel.
   BaseType_t rc;
   Serial.printf("[TASK] creating audioLink (4096 B, pri 6, core 0)...\n");
-  rc = xTaskCreatePinnedToCore(audioLinkTask, "audioLink", 4096, nullptr, 6,
+  // [link-task-stack] 4096 was too tight for the SPI slave driver plus the
+  // WiFi/IPC paths it touches. 8192 matches udpSend and players.
+  rc = xTaskCreatePinnedToCore(audioLinkTask, "audioLink", 8192, nullptr, 6,
                                nullptr, 0);
   if (rc != pdPASS) { LOGE("FAILED to create audioLinkTask (%d)", (int)rc);
                       Serial.printf("[TASK] audioLink FAILED (%d)\n", (int)rc); }
