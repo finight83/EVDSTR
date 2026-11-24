@@ -5,9 +5,17 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 
-inline void loadWiFiSettings() {
+// Returns the zones blob from the same open handle, so the zones loader never
+// has to open the namespace a second time during setup() (see
+// [zones-one-nvs-handle] in EVDPlayers.h).
+inline String loadWiFiSettings() {
+  String zonesBlob;
   PrefsGuard g("evdstr", true);
-  if (!g.ok) { LOGW("NVS: cannot open evdstr, using defaults"); return; }
+  if (!g.ok) {
+    LOGW("NVS: cannot open evdstr, using defaults");
+    return zonesBlob;
+  }
+  zonesBlob = g.prefs.getString("zones", "");
   serverName    = g.prefs.getString("srvname", "EVDSTR");
   wifiSsid      = g.prefs.getString("ssid",    "");
   wifiPassword  = g.prefs.getString("pass",    "");
@@ -23,6 +31,7 @@ inline void loadWiFiSettings() {
   ctrHost       = g.prefs.getString("ctrhost", "");
   LOGI("settings: name=%s ssid=%s ctr=%s", serverName.c_str(),
        wifiSsid.c_str(), ctrHost.c_str());
+  return zonesBlob;
 }
 
 inline void saveWiFiSettings() {
