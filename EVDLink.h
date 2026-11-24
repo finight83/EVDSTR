@@ -127,6 +127,30 @@ enum LinkHeaderVerdict {
 // Validates a header the consumer just clocked in. Returns the number of
 // payload bytes the consumer must still clock, or 0 with a verdict set.
 // `payloadLenOut` is 0 for a silence frame (legal, verdict OK).
+// ---- Frame framing (added after the first bring-up review) -----------------
+//
+// The slave side can only accept bytes while a transaction is queued, so the
+// consumer keeps one armed at all times and cannot know the payload length in
+// advance. The producer therefore always clocks the FULL frame:
+// LINK_HDR_BYTES + LINK_MAX_PAYLOAD. `len` is not on the wire; it is derived
+// from the header's `samples` and `channels`, which is what the header exists
+// for. Padding past the real Opus payload is zero-filled and discarded.
+//
+// This keeps one CS assertion per frame (two transactions would leave a clock
+// gap the slave cannot distinguish from the end of a frame) and lets the
+// consumer re-arm a fixed-size transaction instead of computing lengths from
+// bytes it has not received yet.
+#define LINK_WIRE_BYTES (LINK_HDR_BYTES + LINK_MAX_PAYLOAD)
+
+// Payload length implied by a validated header. Silence frames carry none.
+static inline uint32_t linkPayloadLenFromHeader(const LinkFrameHeader &h) {
+  if (h.flags & LINK_FLAG_SILENCE) return 0;
+  if (h.samples == 0 || h.channels == 0) return 0;
+  // 192 kbps ceiling at 20 ms = 480 bytes; 1024 is the structural maximum.
+  uint32_t est = ((uint32_t)h.samples * (uint32_t)h.channels * 3u) / 2u + 16u;
+  return (est > LINK_MAX_PAYLOAD) ? LINK_MAX_PAYLOAD : est;
+}
+
 static inline LinkHeaderVerdict linkCheckHeader(const LinkFrameHeader &h,
                                                 uint32_t &payloadLenOut) {
   payloadLenOut = 0;

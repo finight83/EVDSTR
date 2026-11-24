@@ -25,6 +25,7 @@ static const uint32_t LINK_STALE_DROP_MS = 400;
 
 volatile uint32_t statLinkIn          = 0;
 volatile uint32_t statLinkInBad       = 0;
+volatile uint32_t statLinkSilence     = 0;
 volatile uint32_t statLinkStale       = 0;
 volatile uint32_t statLinkLastOkMs    = 0;
 volatile uint32_t statLinkGapMs       = 0;
@@ -81,8 +82,11 @@ inline void audioLinkTask(void *param) {
     // A silence frame keeps the encoder's 20 ms cadence but carries no audio.
     // It is counted and never queued: players already conceal a gap, and an
     // empty UDP datagram would only reset their concealment counters.
+    // [link-silence-counter] This used to bump statLinkStale, the counter for
+    // "the producer stopped", so a muted source was indistinguishable from a
+    // dead EVDCTR on /api/stats - the first thing anyone checks for no audio.
     if (silence || len == 0) {
-      statLinkStale++;
+      statLinkSilence++;
       continue;
     }
 

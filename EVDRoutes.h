@@ -75,7 +75,11 @@ inline void handleApiStats(AsyncWebServerRequest *request) {
   j += "\"framesSent\":" + String((unsigned long)statFramesSentTotal) + ",";
   j += "\"framesDropped\":" + String((unsigned long)statFramesDroppedTotal) + ",";
   j += "\"linkIn\":" + String((unsigned long)statLinkIn) + ",";
-  j += "\"linkInBad\":" + String((unsigned long)statLinkInBad) + ",";
+  // [link-counters-live] linkInBad was declared but never written, so this
+  // field read 0 forever - including while the link was corrupting frames.
+  j += "\"linkInBad\":" + String((unsigned long)linkBadHeaders()) + ",";
+  j += "\"linkRxTimeouts\":" + String((unsigned long)linkRxTimeouts()) + ",";
+  j += "\"linkSilence\":" + String((unsigned long)statLinkSilence) + ",";
   j += "\"linkStale\":" + String((unsigned long)statLinkStale) + ",";
   j += "\"linkGapMs\":" + String((unsigned long)statLinkGapMs) + ",";
   j += "\"heapFree\":" + String((unsigned long)ESP.getFreeHeap()) + ",";

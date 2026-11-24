@@ -49,6 +49,8 @@ static uint8_t DMA_ATTR gLinkRxBuf[LINK_HDR_BYTES + LINK_MAX_PAYLOAD]
     __attribute__((aligned(4)));
 
 static volatile bool gLinkUp = false;
+static spi_slave_transaction_t gLinkTrans;
+static bool          gLinkArmed         = false;
 static uint32_t      gLinkFramesRx      = 0;
 static uint32_t      gLinkBadHeaders    = 0;
 static uint32_t      gLinkRxTimeouts    = 0;
@@ -109,9 +111,17 @@ inline void logLinkPeerState(const char *when) {
 }
 
 // ---- Frame receive ----------------------------------------------------------
-// Waits up to `waitUs` for the producer's IRQ edge. Returns true when a
-// complete, valid frame was clocked into `payloadOut`. On false, nothing was
-// consumed and the caller should simply loop (the next frame is 20 ms away).
+// The ESP-IDF SPI slave driver only accepts bytes while a transaction is
+// queued. spi_slave_transmit() queues one, blocks for it, and unqueues it - so
+// between calls there is nothing staged, and any CS edge CTR raises in that
+// window is clocked into nowhere. At 50 frames/s the producer is ready every
+// 20 ms while this task is between polls, so the old code lost a large
+// fraction of frames and the link looked "up" while audio stuttered.
+//
+// The fix is to keep a transaction queued at ALL times: queue it with
+// spi_slave_queue_trans(), then wait on spi_slave_get_trans_result(). The
+// buffer is never unqueued, so a frame that lands while the task is busy is
+// still received. `waitUs` now bounds the RESULT wait, not the queueing.
 //
 // `samplesOut`, `channelsOut`, `rateHzOut` and `silenceOut` describe the frame
 // so the caller can drive the pacer and the wire header without re-parsing.
@@ -122,61 +132,69 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
   lenOut = 0; samplesOut = 0; channelsOut = 0; rateHzOut = 0; silenceOut = false;
   if (!gLinkUp) return false;
 
+  // Re-arm the permanently-queued transaction. CTR clocks the whole frame -
+  // header and payload - in one CS assertion, so the length is always the
+  // maximum and the header tells us how much of it is real.
+  if (!gLinkArmed) {
+    gLinkTrans.length    = LINK_WIRE_BYTES * 8;
+    gLinkTrans.tx_buffer = nullptr;
+    gLinkTrans.rx_buffer = gLinkRxBuf;
+    if (spi_slave_queue_trans(LINK_SPI_HOST, &gLinkTrans, 0) != ESP_OK) {
+      gLinkRxTimeouts++;
+      return false;
+    }
+    gLinkArmed = true;
+  }
+
+  // CTR drives IRQ high for the duration of a frame. Waiting for it here
+  // keeps the caller's poll cheap and lets a dead producer return promptly.
   const uint32_t t0 = micros();
   while (gpio_get_level((gpio_num_t)PIN_LINK_IRQ) == 0) {
     if ((uint32_t)(micros() - t0) > waitUs) return false;
   }
 
-  gpio_set_level((gpio_num_t)PIN_LINK_CS, 0);
-
-  // Header first: we must know the payload length before we can clock it,
-  // and the master has already staged the whole frame, so it simply waits in
-  // its shifter while we validate.
-  spi_slave_transaction_t th = {};
-  th.length    = LINK_HDR_BYTES * 8;
-  th.tx_buffer = nullptr;
-  th.rx_buffer = gLinkRxBuf;
-  esp_err_t rc = spi_slave_transmit(LINK_SPI_HOST, &th, pdMS_TO_TICKS(10));
-  if (rc != ESP_OK) {
-    gpio_set_level((gpio_num_t)PIN_LINK_CS, 1);
+  spi_slave_transaction_t *done = nullptr;
+  esp_err_t rc = spi_slave_get_trans_result(LINK_SPI_HOST, &done,
+                                            pdMS_TO_TICKS(10));
+  if (rc != ESP_OK || done == nullptr) {
+    // The transaction was not consumed. It is still queued, so leave it armed;
+    // a timeout here means CTR went quiet mid-frame.
     gLinkRxTimeouts++;
+    return false;
+  }
+  gLinkArmed = false;   // re-armed on the next call
+
+  if (done->trans_len < LINK_HDR_BYTES * 8) {
+    gLinkBadHeaders++;
     return false;
   }
 
   LinkFrameHeader h;
   memcpy(&h, gLinkRxBuf, LINK_HDR_BYTES);
-  uint32_t payloadLen = 0;
-  if (linkCheckHeader(h, payloadLen) != LINK_HDR_OK ||
-      payloadLen > payloadCap) {
-    // Still clock the payload out of the shifter when the length is known,
-    // otherwise CTR's next transaction starts mid-frame.
-    if (payloadLen > 0 && payloadLen <= LINK_MAX_PAYLOAD) {
-      spi_slave_transaction_t ts = {};
-      ts.length    = payloadLen * 8;
-      ts.tx_buffer = nullptr;
-      ts.rx_buffer = gLinkRxBuf;
-      spi_slave_transmit(LINK_SPI_HOST, &ts, pdMS_TO_TICKS(10));
-    }
-    gpio_set_level((gpio_num_t)PIN_LINK_CS, 1);
+  uint32_t declaredLen = 0;
+  if (linkCheckHeader(h, declaredLen) != LINK_HDR_OK) {
+    gLinkBadHeaders++;
+    return false;
+  }
+  // [link-fixed-frame] The frame is always LINK_WIRE_BYTES on the wire; the
+  // real payload length comes from the header, not from trans_len.
+  const uint32_t payloadLen = linkPayloadLenFromHeader(h);
+
+  // trans_len is the number of BITS actually clocked. A frame the producer
+  // aborted mid-way arrives short and must not be handed on as audio.
+  const uint32_t clockedBytes = (uint32_t)(done->trans_len / 8);
+  if (clockedBytes < LINK_WIRE_BYTES) {
+    gLinkBadHeaders++;
+    return false;
+  }
+  if (payloadLen > payloadCap || payloadLen > LINK_MAX_PAYLOAD) {
     gLinkBadHeaders++;
     return false;
   }
 
   if (payloadLen > 0) {
-    spi_slave_transaction_t ts = {};
-    ts.length    = payloadLen * 8;
-    ts.tx_buffer = nullptr;
-    ts.rx_buffer = gLinkRxBuf;
-    rc = spi_slave_transmit(LINK_SPI_HOST, &ts, pdMS_TO_TICKS(10));
-    if (rc != ESP_OK) {
-      gpio_set_level((gpio_num_t)PIN_LINK_CS, 1);
-      gLinkRxTimeouts++;
-      return false;
-    }
-    memcpy(payloadOut, gLinkRxBuf, payloadLen);
+    memcpy(payloadOut, gLinkRxBuf + LINK_HDR_BYTES, payloadLen);
   }
-
-  gpio_set_level((gpio_num_t)PIN_LINK_CS, 1);
 
   lenOut      = payloadLen;
   samplesOut  = h.samples;
@@ -186,3 +204,11 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
   gLinkFramesRx++;
   return true;
 }
+
+// Counters for /api/stats. They live here because this is the only file that
+// knows what went wrong on the wire, and the dashboard's "is the link healthy"
+// answer depends on them: a link that drops frames looks identical to a
+// healthy one without these.
+inline uint32_t linkFramesRx()     { return gLinkFramesRx; }
+inline uint32_t linkBadHeaders()   { return gLinkBadHeaders; }
+inline uint32_t linkRxTimeouts()   { return gLinkRxTimeouts; }

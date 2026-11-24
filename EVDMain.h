@@ -14,7 +14,7 @@ inline void printBootBanner(const char *phase) {
   Serial.printf("\n");
   Serial.printf("+------------------------------------------------------+\n");
   Serial.printf("|  EVDSTR  %-10s  stream / players half           |\n", EVD_FW_VERSION);
-  Serial.printf("|  %-50s|\n", phase);
+  Serial.printf("|  %-52s|\n", phase);
   Serial.printf("+------------------------------------------------------+\n");
 }
 
@@ -77,6 +77,10 @@ inline void setup_serial() {
                 AUDIO_UDP_PORT, (unsigned)OPUS_SAMPLE_RATE_DEFAULT, OPUS_FRAME_MS);
   Serial.printf("[BOOT] pin link      : SCLK %d MOSI %d IRQ %d CS %d (slave)\n",
                 PIN_LINK_SCLK, PIN_LINK_MOSI, PIN_LINK_IRQ, PIN_LINK_CS);
+  Serial.printf("[BOOT] link contract : %u B frame (%u hdr + %u payload), %lu Hz mode 0, IRQ setup %u us\n",
+                (unsigned)LINK_WIRE_BYTES, (unsigned)LINK_HDR_BYTES,
+                (unsigned)LINK_MAX_PAYLOAD, (unsigned long)LINK_SPI_HZ,
+                (unsigned)LINK_IRQ_SETUP_US);
   Serial.printf("[BOOT] discovery     : UDP %d, probe every %d ms while unpaired\n",
                 DISCOVERY_PORT, DISCOVERY_TX_MS);
   Serial.printf("\n");

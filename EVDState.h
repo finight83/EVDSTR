@@ -86,6 +86,7 @@ portMUX_TYPE gStatsMux = portMUX_INITIALIZER_UNLOCKED;
 // read by the HTTP task and playerTask.
 extern volatile uint32_t statLinkIn;
 extern volatile uint32_t statLinkInBad;
+extern volatile uint32_t statLinkSilence;
 extern volatile uint32_t statLinkStale;
 extern volatile uint32_t statLinkLastOkMs;
 extern volatile uint32_t statLinkGapMs;
