@@ -14,8 +14,8 @@
 #include <Update.h>
 #include <ESPAsyncWebServer.h>
 
-volatile bool otaUploadInProgress = false;
-volatile bool otaInProgress       = false;
+bool otaUploadInProgress = false;
+bool otaInProgress       = false;
 bool          otaUploadFailed     = false;
 String        otaUploadMessage    = "";
 

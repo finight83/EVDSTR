@@ -301,7 +301,9 @@ inline void handleLogTail(AsyncWebServerRequest *request) {
 // ---- setup -----------------------------------------------------------------
 inline void setup_http_server() {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    AsyncWebServerResponse *res = request->beginResponse_P(
+    // beginResponse_P() is deprecated in ESP Async WebServer 3.12: the
+    // non-_P overload does exactly this, the array is already in flash.
+    AsyncWebServerResponse *res = request->beginResponse(
         200, "text/html", EVDSTRCTRL_GZ, EVDSTRCTRL_GZ_LEN);
     res->addHeader("Content-Encoding", "gzip");
     res->addHeader("Cache-Control", "no-store, max-age=0");

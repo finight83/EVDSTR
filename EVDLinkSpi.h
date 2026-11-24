@@ -10,14 +10,20 @@
 //
 //  Handshake, from this side:
 //
-//    poll IRQ high            (CTR has a frame staged and is waiting for us)
-//    assert CS low
-//    clock LINK_HDR_BYTES, validate
-//    clock `len` payload bytes into the receive ring
-//    raise CS                 (CTR sees this and considers the frame sent)
+//    wait IRQ high            (CTR has a frame staged and is waiting for us)
+//    CTR asserts CS low, clocks LINK_WIRE_BYTES (8 B header + 1024 B)
+//    CTR raises CS            (and then releases IRQ)
+//    collect the result, validate the header, take linkPayloadLenFromHeader()
 //
-//  We raise CS in every exit path, including a bad header: CTR is blocked on
-//  it, and a malformed frame must cost one frame, not a stalled producer.
+//  Neither CS nor the clock count is ours to choose: the master drives CS, and
+//  the slave transaction is armed for the fixed maximum because the real
+//  payload length is only known after the header has arrived. That is why the
+//  frame is a fixed size on the wire (LINK_WIRE_BYTES, in EVDLink.h) and why
+//  this file never inspects CS itself.
+//
+//  A malformed frame costs one frame: it is counted in gLinkBadHeaders and the
+//  transaction is re-armed on the next call. Nothing here can stall CTR,
+//  because CTR's own send is bounded and never retries.
 //
 //  Wiring: see the master half (EVDCTR/EVDLinkSpi.h). The two pin maps must
 //  be identical; LINK_IRQ and LINK_CS swap direction, nothing else changes.
@@ -48,7 +54,7 @@
 static uint8_t DMA_ATTR gLinkRxBuf[LINK_HDR_BYTES + LINK_MAX_PAYLOAD]
     __attribute__((aligned(4)));
 
-static volatile bool gLinkUp = false;
+static bool gLinkUp = false;
 static spi_slave_transaction_t gLinkTrans;
 static bool          gLinkArmed         = false;
 static uint32_t      gLinkFramesRx      = 0;
@@ -153,8 +159,8 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
   if (!gLinkUp) return false;
 
   // Re-arm the permanently-queued transaction. CTR clocks the whole frame -
-  // header and payload - in one CS assertion, so the length is always the
-  // maximum and the header tells us how much of it is real.
+  // header, payload and zero padding - in one CS assertion, so the armed
+  // length is always the maximum and the header tells us how much is real.
   if (!gLinkArmed && !linkArm()) {
     gLinkRxTimeouts++;
     return false;

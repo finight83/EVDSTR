@@ -12,8 +12,8 @@
 
 // Owned by EVDOTA.h (included after this file). Declared here because the
 // zone handlers refuse to mutate config while an update is being written.
-extern volatile bool otaInProgress;
-extern volatile bool otaUploadInProgress;
+extern bool otaInProgress;
+extern bool otaUploadInProgress;
 
 // ---- Zones persistence -----------------------------------------------------
 // Bar-encoded in NVS, one string: "id|name|vol|mute|ip,ip;id|name|..." — small
@@ -544,7 +544,11 @@ inline void handleZonesDelete(AsyncWebServerRequest *request, uint8_t *data,
   // ArduinoJson accepts) and every later in["..."] read was empty.
   DeserializationError bodyErr = deserializeJson(in, body, bodyLen);
   bool badBody = (bodyErr != DeserializationError::Ok);
-  if (!badBody && !in["name"].is<const char*>()) badBody = true;
+  // [zone-delete-validates-id] This used to require "name" and then delete by
+  // "id": a correct {"id":...} was refused as bad json, and a name-only body
+  // answered ok:true while deleting nothing. The field that is used is the
+  // field that must be present.
+  if (!badBody && !in["id"].is<const char*>()) badBody = true;
   if (badBody) {
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"bad json\"}");
     return;
@@ -555,12 +559,21 @@ inline void handleZonesDelete(AsyncWebServerRequest *request, uint8_t *data,
     request->send(400, "application/json", "{\"ok\":false,\"error\":\"Main Room cannot be deleted\"}");
     return;
   }
+  // A delete of a zone that is not there used to answer ok:true and write the
+  // (unchanged) table back to NVS. Say 404 instead: a dashboard that deletes a
+  // zone twice, or deletes by a stale id, needs to know it did nothing.
+  bool removed = false;
   if (lockFor(zonesMutex, 100)) {
     for (int i = (int)zones.size() - 1; i >= 0; --i) {
-      if (zones[i].id == id) { zones.erase(zones.begin() + i); break; }
+      if (zones[i].id == id) { zones.erase(zones.begin() + i); removed = true; break; }
     }
-    saveZonesToNVSLocked();
+    if (removed) saveZonesToNVSLocked();
     unlockFor(zonesMutex);
+  }
+  if (!removed) {
+    request->send(404, "application/json",
+                  "{\"ok\":false,\"error\":\"no such zone\"}");
+    return;
   }
   broadcastNodeConfig();
   request->send(200, "application/json", "{\"ok\":true}");
