@@ -117,6 +117,10 @@ inline bool setupLinkSpi() {
   if (!gLinkIrqSem) gLinkIrqSem = xSemaphoreCreateBinary();
   if (!gLinkIrqSem) return false;
   gpio_set_intr_type((gpio_num_t)PIN_LINK_IRQ, GPIO_INTR_POSEDGE);
+  // Without the ISR service gpio_isr_handler_add() fails, setup returns false,
+  // and the link task would spin. ESP_ERR_INVALID_STATE = already installed.
+  esp_err_t isrRc = gpio_install_isr_service(0);
+  if (isrRc != ESP_OK && isrRc != ESP_ERR_INVALID_STATE) return false;
   if (gpio_isr_handler_add((gpio_num_t)PIN_LINK_IRQ, linkIrqIsr, nullptr) != ESP_OK) {
     return false;
   }
@@ -178,13 +182,19 @@ inline bool linkReceiveFrame(uint8_t *payloadOut, uint32_t payloadCap,
                              uint8_t &channelsOut, uint32_t &rateHzOut,
                              bool &silenceOut, uint32_t waitUs) {
   lenOut = 0; samplesOut = 0; channelsOut = 0; rateHzOut = 0; silenceOut = false;
-  if (!gLinkUp) return false;
+  if (!gLinkUp) {
+    // Link init failed: never return instantly, or the caller's loop spins
+    // and starves Idle (TASK_WDT). Behave like "no partner".
+    vTaskDelay(pdMS_TO_TICKS(waitUs / 1000 + 1));
+    return false;
+  }
 
   // Re-arm the permanently-queued transaction. CTR clocks the whole frame -
   // header, payload and zero padding - in one CS assertion, so the armed
   // length is always the maximum and the header tells us how much is real.
   if (!gLinkArmed && !linkArm()) {
     gLinkRxTimeouts++;
+    vTaskDelay(pdMS_TO_TICKS(waitUs / 1000 + 1));
     return false;
   }
 
