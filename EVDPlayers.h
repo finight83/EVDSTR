@@ -107,8 +107,22 @@ inline void loadZonesFromNVS(const String &encIn) {
 }
 
 // ---- node perf -------------------------------------------------------------
+// [nodeperf-lock-guard] Two ways this used to run without the mutex:
+//   - perfMutex was still NULL (a caller before createSyncPrimitives());
+//   - lockFor() is defined LATER in the translation unit than this function,
+//     so it resolved by ADL at template-instantiation time and the compiler
+//     silently compiled this body against a different declaration.
+// Both left nodePerf.push_back() / String concatenation unprotected on a
+// vector that the HTTP task also mutates, which is a heap corruption, not a
+// race in theory: it aborted inside tlsf_free on the first player report.
+// This guard makes the failure visible instead of fatal.
 inline void updateNodePerf(const String &ip, uint32_t latencyMs, uint32_t queueDepth,
                            uint32_t target, uint16_t rebuffers, unsigned long now) {
+  if (!perfMutex) {
+    static bool warned = false;
+    if (!warned) { warned = true; LOGW("nodePerf: mutex not created yet - report dropped"); }
+    return;
+  }
   if (!lockFor(perfMutex, 40)) return;
   for (auto &p : nodePerf) {
     if (p.ip == ip) {
