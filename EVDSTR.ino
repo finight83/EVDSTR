@@ -84,8 +84,10 @@
 #include "EVDSTRCTRL_GZ.h"
 
 // ---- Versioning ------------------------------------------------------------
+// Always update this field with latest patch updates
 #ifndef EVD_FW_VERSION
-#define EVD_FW_VERSION "1.0.0.0" // EVDSTR: streaming side of the split server
+#define EVD_FW_VERSION "1.0.0.0" 
+// EVDSTR: streaming side of the split server
 #endif
 #define FW_VERSION EVD_FW_VERSION
 
@@ -239,11 +241,16 @@ inline bool handleClockSyncRequests();
 inline void pruneStaleSubscribers(unsigned long now);
 inline void loadZonesFromNVS(const String &encIn);
 inline void saveZonesToNVS();
-inline void broadcastNodeConfig();
-// [nodeperf-mutex-decl] Defined in EVDHelpers.h, used by EVDPlayers.h: without
-// this the call is resolved by ADL at template-instantiation time, which is
-// how updateNodePerf() ended up compiled WITHOUT the mutex helpers it needs
-// and blew up inside std::vector/String on the first real player report.
+inline void broadcastNodeConfig();
+
+// [nodeperf-mutex-decl] Defined in EVDHelpers.h, used by EVDPlayers.h: without
+
+// this the call is resolved by ADL at template-instantiation time, which is
+
+// how updateNodePerf() ended up compiled WITHOUT the mutex helpers it needs
+
+// and blew up inside std::vector/String on the first real player report.
+
 inline void pruneStalePerfLocked(unsigned long now);
 inline void sendZoneConfigToIp(const String &ip, int zvol, bool zmute);
 inline void updateNodePerf(const String &ip, uint32_t latencyMs, uint32_t queueDepth,
