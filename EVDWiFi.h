@@ -115,7 +115,7 @@ inline void handleRestart(AsyncWebServerRequest *request) {
 // and to pick up its controller's address from the reply so the encoder mirror
 // and the status push have somewhere to go.
 static unsigned long gLastProbeMs = 0;
-volatile uint32_t statDiscoveryProbes = 0;
+uint32_t statDiscoveryProbes = 0;
 
 inline void setupDiscoveryResponder() {
   if (!discoveryUdp.begin(DISCOVERY_PORT)) {

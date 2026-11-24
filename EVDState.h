@@ -12,22 +12,22 @@
 // parameters on every registration and ctrl push, and the dashboard shows
 // them. The values arrive from EVDCTR over the relay (see EVDRoutes.h
 // /api/audio/encoding) and from the link header (rate, per frame).
-volatile uint32_t g_opusSampleRate   = OPUS_SAMPLE_RATE_DEFAULT;
-volatile uint16_t g_opusFrameSamples = OPUS_SAMPLE_RATE_DEFAULT / (1000 / OPUS_FRAME_MS);
-volatile uint8_t  g_opusChannels     = CHANNELS;
-volatile uint32_t g_sourceSampleRate = 48000;
-volatile int g_currentBitrate        = 96000;
-volatile int currentOpusComplexity   = 10;
-volatile int g_currentVbr            = 1;
-volatile int g_currentVbrConstraint  = 1;
-volatile int g_currentSignal         = OPUS_AUTO;
-volatile int g_currentApplication    = 1;   // OPUS_APPLICATION_AUDIO
+uint32_t g_opusSampleRate   = OPUS_SAMPLE_RATE_DEFAULT;
+uint16_t g_opusFrameSamples = OPUS_SAMPLE_RATE_DEFAULT / (1000 / OPUS_FRAME_MS);
+uint8_t  g_opusChannels     = CHANNELS;
+uint32_t g_sourceSampleRate = 48000;
+int g_currentBitrate        = 96000;
+int currentOpusComplexity   = 10;
+int g_currentVbr            = 1;
+int g_currentVbrConstraint  = 1;
+int g_currentSignal         = OPUS_AUTO;
+int g_currentApplication    = 1;   // OPUS_APPLICATION_AUDIO
 
 // ---- Stream settings -------------------------------------------------------
-volatile uint16_t audioBufferMs = 200;
-volatile uint8_t  masterVolume  = 100;
-volatile bool     masterMuted   = false;
-volatile uint8_t  playbackModeIdx = 1;      // 0 off, 1 music, 2 movie
+uint16_t audioBufferMs = 200;
+uint8_t  masterVolume  = 100;
+bool     masterMuted   = false;
+uint8_t  playbackModeIdx = 1;      // 0 off, 1 music, 2 movie
 inline const char *playbackModeCStr() {
   switch (playbackModeIdx) {
     case 0:  return "off";
@@ -64,19 +64,19 @@ WiFiUDP discoveryUdp;
 SemaphoreHandle_t ctrlMutex = nullptr;
 
 // ---- Statistics ------------------------------------------------------------
-volatile uint32_t statOpusEncoded   = 0;   // frames queued from the link
-volatile uint32_t statOpusDropped   = 0;   // queue full / link stale
-volatile uint32_t statUdpSent       = 0;   // datagrams actually put on the wire
-volatile uint32_t statUdpErrors     = 0;
-volatile uint32_t statSyncRequests  = 0;
-volatile uint32_t statSyncRequestErrors = 0;
-volatile uint32_t statPacerLateMax  = 0;
-volatile uint32_t statPacerLateLastSec = 0;
-volatile uint32_t statPacerStaleSkips  = 0;
-volatile uint32_t statFramesSentTotal  = 0;
-volatile uint32_t statFramesDroppedTotal = 0;
-volatile uint32_t statQueueDepth    = 0;
-volatile uint32_t statQueueTarget   = 3;
+uint32_t statOpusEncoded   = 0;   // frames queued from the link
+uint32_t statOpusDropped   = 0;   // queue full / link stale
+uint32_t statUdpSent       = 0;   // datagrams actually put on the wire
+uint32_t statUdpErrors     = 0;
+uint32_t statSyncRequests  = 0;
+uint32_t statSyncRequestErrors = 0;
+uint32_t statPacerLateMax  = 0;
+uint32_t statPacerLateLastSec = 0;
+uint32_t statPacerStaleSkips  = 0;
+uint32_t statFramesSentTotal  = 0;
+uint32_t statFramesDroppedTotal = 0;
+uint32_t statQueueDepth    = 0;
+uint32_t statQueueTarget   = 3;
 
 portMUX_TYPE gStatsMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -84,14 +84,14 @@ portMUX_TYPE gStatsMux = portMUX_INITIALIZER_UNLOCKED;
 // DEFINED in EVDAudio.h, which comes later in the include order, so this is a
 // declaration only. All of these are written by audioLinkTask (core 0) and
 // read by the HTTP task and playerTask.
-extern volatile uint32_t statLinkIn;
-extern volatile uint32_t statLinkInBad;
-extern volatile uint32_t statLinkSilence;
-extern volatile uint32_t statLinkStale;
-extern volatile uint32_t statLinkLastOkMs;
-extern volatile uint32_t statLinkGapMs;
-extern volatile uint32_t gWireSeq;
-extern volatile uint32_t gLastLinkedRate;
+extern uint32_t statLinkIn;
+// (no statLinkInBad: the counters live in EVDLinkSpi.h, see linkBadHeaders())
+extern uint32_t statLinkSilence;
+extern uint32_t statLinkStale;
+extern uint32_t statLinkLastOkMs;
+extern uint32_t statLinkGapMs;
+extern uint32_t gWireSeq;
+extern uint32_t gLastLinkedRate;
 
 // ---- Log ring --------------------------------------------------------------
 #define EVD_LOG_RING_LEN 32
@@ -104,7 +104,7 @@ struct LogRingEntry {
 LogRingEntry      gLogRing[EVD_LOG_RING_LEN];
 uint32_t          gLogRingSeq = 0;
 portMUX_TYPE      gLogRingMux = portMUX_INITIALIZER_UNLOCKED;
-volatile uint8_t  gSerialLogLevel = 3;
+uint8_t  gSerialLogLevel = 3;
 
 // ---- Identity / settings ---------------------------------------------------
 String serverName    = "EVDSTR";
@@ -129,5 +129,5 @@ SemaphoreHandle_t prefsMutex = nullptr;
 // change reaches the players without a control channel on the pin link.
 String ctrHost = "";
 String ctrVersion = "";
-volatile uint32_t ctrLastPullMs = 0;
+uint32_t ctrLastPullMs = 0;
 SemaphoreHandle_t ctrPullMutex = nullptr;

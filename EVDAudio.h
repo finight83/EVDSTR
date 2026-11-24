@@ -23,14 +23,20 @@
 // already conceal a gap correctly.
 static const uint32_t LINK_STALE_DROP_MS = 400;
 
-volatile uint32_t statLinkIn          = 0;
-volatile uint32_t statLinkInBad       = 0;
-volatile uint32_t statLinkSilence     = 0;
-volatile uint32_t statLinkStale       = 0;
-volatile uint32_t statLinkLastOkMs    = 0;
-volatile uint32_t statLinkGapMs       = 0;
-volatile uint32_t gWireSeq            = 1;
-volatile uint32_t gLastLinkedRate     = OPUS_SAMPLE_RATE_DEFAULT;
+uint32_t statLinkIn          = 0;
+// [link-in-bad-unused] There used to be a statLinkInBad here, mirrored from
+// EVDLinkSpi.h into /api/stats. Nothing ever wrote it, so it read 0 even while
+// frames were being rejected. The real counters live in EVDLinkSpi.h
+// (linkBadHeaders / linkRxTimeouts) and are the ones the routes read.
+uint32_t statLinkSilence     = 0;
+// Frames that arrived AFTER a gap longer than LINK_STALE_DROP_MS. Since the
+// silence frames were given their own counter this is a genuine fault counter:
+// it counts recoveries from a producer that went away and came back.
+uint32_t statLinkStale       = 0;
+uint32_t statLinkLastOkMs    = 0;
+uint32_t statLinkGapMs       = 0;
+uint32_t gWireSeq            = 1;
+uint32_t gLastLinkedRate     = OPUS_SAMPLE_RATE_DEFAULT;
 
 // ---- audioLinkTask (core 0) ------------------------------------------------
 // Polls the link, validates, stamps and queues. The wait is short (2 ms) so a
@@ -99,6 +105,12 @@ inline void audioLinkTask(void *param) {
       }
       continue;
     }
+
+    // [link-stale-on-recovery] statLinkStale is exported as linkStale, so it
+    // has to mean something: count the frame that ends a gap longer than
+    // LINK_STALE_DROP_MS. Before this it was only ever read, never written,
+    // and the dashboard showed a permanent 0 next to real gap numbers.
+    if (lastRxMs && (now - lastRxMs) > LINK_STALE_DROP_MS) statLinkStale++;
 
     lastRxMs = now;
     statLinkLastOkMs = now;
