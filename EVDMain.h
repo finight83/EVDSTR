@@ -149,9 +149,11 @@ void setup() {
 
   // Zones before the HTTP server: the registration handler can run the moment
   // the server is up and it reads the zone table.
-  loadZonesFromNVS();
-
-  loadWiFiSettings();
+  //
+  // One NVS handle, not two: the settings read returns the zones blob it found
+  // while the namespace was already open. Opening it twice from setup() was
+  // the hang - see [zones-one-nvs-handle].
+  loadZonesFromNVS(loadWiFiSettings());
   if (wifiSsid.length() && !wifiPassword.length()) {
     // A saved SSID with no password is almost always a password that was
     // cleared by a failed save, not an open network. Say so: this is the most

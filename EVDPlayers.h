@@ -55,12 +55,15 @@ inline void saveZonesToNVS() {
   g.prefs.putString("zones", enc);
 }
 
-inline void loadZonesFromNVS() {
-  String enc;
-  {
-    PrefsGuard g("evdstr", true);
-    if (g.ok) enc = g.prefs.getString("zones", "");
-  }
+// [zones-one-nvs-handle] The zones blob used to be read here with its own
+// PrefsGuard, i.e. a second open handle on the same namespace, while setup()
+// had already taken the mutex for the settings read. Two handles, one mutex,
+// both taken from setup() before the scheduler is doing anything useful: the
+// first boot after this change hung between "zones: loaded 1" and the stored
+// config line and tripped the task watchdog. The blob now arrives from the
+// caller, which reads it once under the handle it already holds.
+inline void loadZonesFromNVS(const String &encIn) {
+  const String &enc = encIn;
   std::vector<Zone> loaded;
   if (enc.length()) {
     int start = 0;

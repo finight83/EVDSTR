@@ -9,13 +9,25 @@
 struct PrefsGuard {
   Preferences prefs;
   bool        ok = false;
+  bool        locked = false;
   explicit PrefsGuard(const char *ns, bool ro = false) {
-    if (prefsMutex) xSemaphoreTake(prefsMutex, portMAX_DELAY);
+    // [nvs-lock-no-forever] This used portMAX_DELAY. The board carried two
+    // NVS handles (the zones loader and the settings loader) taken from
+    // setup() with no bound, so a slow or stuck NVS operation on one task
+    // froze every later reader with no timeout and no log - the whole
+    // firmware stops at the next PrefsGuard, and setup() never finishes.
+    // 400 ms is longer than any NVS read/write here and short enough that a
+    // real failure is reported instead of hanging.
+    locked = (!prefsMutex) || (xSemaphoreTake(prefsMutex, pdMS_TO_TICKS(400)) == pdTRUE);
+    if (!locked) {
+      LOGW("NVS: '%s' busy after 400 ms - skipped this access", ns);
+      return;
+    }
     ok = prefs.begin(ns, ro);
   }
   ~PrefsGuard() {
     if (ok) prefs.end();
-    if (prefsMutex) xSemaphoreGive(prefsMutex);
+    if (locked) xSemaphoreGive(prefsMutex);
   }
   PrefsGuard(const PrefsGuard &) = delete;
   PrefsGuard &operator=(const PrefsGuard &) = delete;

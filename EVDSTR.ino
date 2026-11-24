@@ -237,7 +237,7 @@ inline void sendCtrlToSubscriber(const String &ip, const String &json);
 inline void sendAuthoritativeTimeSync();
 inline bool handleClockSyncRequests();
 inline void pruneStaleSubscribers(unsigned long now);
-inline void loadZonesFromNVS();
+inline void loadZonesFromNVS(const String &encIn);
 inline void saveZonesToNVS();
 inline void broadcastNodeConfig();
 inline void sendZoneConfigToIp(const String &ip, int zvol, bool zmute);
