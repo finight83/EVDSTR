@@ -183,11 +183,9 @@ inline void broadcastNodeConfig() {
   std::vector<Zone> zcopy = snapshotZones();
 
   for (auto &s : subs) {
-    int  zvol = 100;
-    bool zmute = false;
-    for (auto &z : zcopy) {
-      if (z.id == MAIN_ZONE_ID) { zvol = z.volume; zmute = z.muted; break; }
-    }
+    // [discovered-nodes] Unassigned nodes are muted until assigned to a room.
+    int  zvol = 0;
+    bool zmute = true;
     for (auto &z : zcopy) {
       bool member = false;
       for (auto &n : z.nodeIps) if (n == s.ip) { member = true; break; }
@@ -313,32 +311,8 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
     unlockFor(subsMutex);
   }
 
-  // A node seen for the first time joins Main Room, so per-zone volume/mute
-  // reach it immediately instead of waiting for the operator to drag it in.
-  if (isNew) {
-    bool assigned = false;
-    if (lockFor(zonesMutex, 80)) {
-      bool inAny = false;
-      for (auto &z : zones) for (auto &zip : z.nodeIps) if (zip == ip) { inAny = true; break; }
-      if (!inAny) {
-        for (auto &z : zones) {
-          if (z.id == MAIN_ZONE_ID) {
-            z.nodeIps.push_back(ip);
-            // Save under the lock we already hold. The deferred settings
-            // flush would do it later, but only through snapshotZones(),
-            // which needs this same mutex.
-            saveZonesToNVSLocked();
-            assigned = true;
-            break;
-          }
-        }
-      }
-      unlockFor(zonesMutex);
-    }
-    // LOGI() takes the log-ring lock. Calling it inside zonesMutex nests two
-    // locks from the HTTP worker, which is how a lock-order stall starts.
-    if (assigned) LOGI("zone: %s auto-assigned to Main Room", ip.c_str());
-  }
+  // [discovered-nodes] A newly-registered node stays unassigned ("Discovered")
+  // and muted until the operator assigns it to a room. No auto-assign to Main.
 
   if (isNew) {
     LOGI("player registered: %s v%s from %s (proto=%d compatible=%s reason=%s)",
@@ -353,7 +327,7 @@ inline void handlePlayerRegistration(AsyncWebServerRequest *request, uint8_t *da
         for (auto &zip : z.nodeIps) if (zip == ip) { zvol = z.volume; zmute = z.muted; found = true; break; }
         if (found) break;
       }
-      if (!found) for (auto &z : zc) if (z.id == MAIN_ZONE_ID) { zvol = z.volume; zmute = z.muted; break; }
+      if (!found) { zvol = 0; zmute = true; }   // Discovered -> muted
     }
 
     String json = String("{\"target\":\"") + ip +
@@ -468,11 +442,23 @@ inline void pollNodeStats() {
 inline void handleApiPlayers(AsyncWebServerRequest *request) {
   std::vector<PlayerNode> ps = snapshotPlayers(millis());
   std::vector<NodePerf>   pf = snapshotPerf();
+  std::vector<Zone>       zc = snapshotZones();
   String j = "[";
   for (size_t i = 0; i < ps.size(); ++i) {
     if (i) j += ",";
+    // [discovered-nodes] Which room this player is in, or "" if Discovered.
+    String zoneId, zoneName;
+    for (auto &z : zc) {
+      for (auto &zip : z.nodeIps) {
+        if (zip == ps[i].ip) { zoneId = z.id; zoneName = z.name; break; }
+      }
+      if (zoneId.length()) break;
+    }
     j += "{\"name\":\"" + jsonEscape(ps[i].name) + "\",\"ip\":\"" + ps[i].ip +
          "\",\"version\":\"" + jsonEscape(ps[i].version) + "\"" +
+         ",\"assigned\":" + (zoneId.length() ? "true" : "false") +
+         ",\"zone\":\"" + jsonEscape(zoneId) + "\"" +
+         ",\"zoneName\":\"" + jsonEscape(zoneName) + "\"" +
          ",\"compatible\":" + (ps[i].audioCompatible ? "true" : "false") +
          ",\"reason\":\"" + jsonEscape(ps[i].audioCompatReason) + "\"";
     for (auto &p : pf) {

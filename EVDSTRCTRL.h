@@ -28,8 +28,9 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
   .kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
   .kv span:last-child{font-variant-numeric:tabular-nums}
   input[type=range]{width:100%}
-  input[type=text]{width:100%;padding:8px;margin-top:4px;border-radius:9px;
+  input[type=text],select{width:100%;padding:8px;margin-top:4px;border-radius:9px;
     border:1px solid #343440;background:#09090c;color:var(--text)}
+  select{padding:6px;margin-top:0}
   button.act{margin-top:10px;background:var(--accent);color:var(--accenttext);border:0;
              padding:9px 16px;border-radius:10px;font-weight:800;cursor:pointer}
   button.act.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
@@ -52,6 +53,7 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
   <span class="pill" id="p-role">streamer</span>
   <span class="pill" id="p-ip">-</span>
   <span class="pill" id="p-subs">0 players</span>
+  <span class="pill" id="p-disc">-</span>
   <span class="pill" id="p-link">link ?</span>
   <span class="pill" id="p-ver">-</span>
 </header>
@@ -82,9 +84,12 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
 
   <div class="grid" style="margin-top:14px">
     <div class="card"><h3>Players</h3><table id="players">
-      <thead><tr><th>Name</th><th>IP</th><th>Ver</th><th>Latency</th><th>Queue</th><th>Compat</th></tr></thead>
+      <thead><tr><th>Name</th><th>IP</th><th>Ver</th><th>Latency</th><th>Queue</th><th>Room</th><th>Compat</th></tr></thead>
       <tbody></tbody></table></div>
-    <div class="card"><h3>Zones</h3><pre id="zones">-</pre></div>
+    <div class="card"><h3>Zones</h3>
+      <div class="row"><input id="zonename" type="text" placeholder="New room name">
+        <button class="act" id="zoneadd" style="flex:0 0 auto;margin-top:0">Add room</button></div>
+      <pre id="zones" style="margin-top:10px">-</pre></div>
   </div>
 </main>
 
@@ -161,16 +166,29 @@ async function tick() {
   }
   if (focusId !== 'ctrhost') $('#ctrhost').value = s.ctr || '';
 
+  const z = await j('/api/zones').catch(() => null);
+  const zones = Array.isArray(z) ? z : [];
+  if (Array.isArray(z)) $('#zones').textContent = JSON.stringify(z, null, 1);
+
   const p = await j('/api/players').catch(() => null);
   if (Array.isArray(p)) {
-    $('#players tbody').innerHTML = p.map(x =>
-      `<tr><td>${x.name}</td><td>${x.ip}</td><td>${x.version || '-'}</td>` +
-      `<td>${x.latencyMs ?? '-'}</td><td>${x.queueDepth ?? '-'}</td>` +
-      `<td>${x.compatible ? 'ok' : (x.reason || 'no')}</td></tr>`).join('')
-      || '<tr><td colspan="6" class="muted">no players yet</td></tr>';
+    const opts = zones.map(zz => `<option value="${zz.id}">${zz.name}</option>`).join('');
+    $('#players tbody').innerHTML = p.map(x => {
+      return `<tr><td>${x.name}</td><td>${x.ip}</td><td>${x.version || '-'}</td>` +
+        `<td>${x.latencyMs ?? '-'}</td><td>${x.queueDepth ?? '-'}</td>` +
+        `<td><select class="roomsel" data-ip="${x.ip}">` +
+          `<option value="">\u2014 Discovered (muted)</option>${opts}</select></td>` +
+        `<td>${x.compatible ? 'ok' : (x.reason || 'no')}</td></tr>`;
+    }).join('') || '<tr><td colspan="7" class="muted">no players yet</td></tr>';
+    // Reflect the current assignment without firing change events.
+    document.querySelectorAll('select.roomsel').forEach(sel => {
+      const row = p.find(x => x.ip === sel.dataset.ip);
+      sel.value = (row && row.zone) ? row.zone : '';
+    });
+    const disc = p.filter(x => !x.assigned).length;
+    const pd = $('#p-disc');
+    if (pd) { pd.textContent = disc + ' discovered'; pd.className = 'pill ' + (disc ? 'warn' : 'ok'); }
   }
-  const z = await j('/api/zones').catch(() => null);
-  if (Array.isArray(z)) $('#zones').textContent = JSON.stringify(z, null, 1);
 }
 
 $('#vol').oninput = e => $('#volv').textContent = e.target.value;
@@ -193,6 +211,23 @@ $('#pair').onclick = async () => {
     $('#pairstat').textContent = r.ok ? 'Paired with ' + r.host : (r.error || 'failed');
     if (!r.ok) err('pairing failed: ' + (r.error || 'no answer'));
   } catch (e) { $('#pairstat').textContent = 'failed'; err(e); }
+};
+
+// Discovered -> room assignment (and back). The Room dropdown is rendered per
+// player in tick(); assigning posts /api/zones/move, un-assigning posts
+// /api/zones/remove-node, which mutes the node again.
+document.addEventListener('change', e => {
+  const sel = e.target.closest ? e.target.closest('select.roomsel') : null;
+  if (!sel) return;
+  const ip = sel.dataset.ip, zone = sel.value;
+  if (zone) txt('/api/zones/move', { ip, zone });
+  else      txt('/api/zones/remove-node', { ip });
+});
+$('#zoneadd').onclick = () => {
+  const n = ($('#zonename').value || '').trim();
+  if (!n) return;
+  txt('/api/zones/create', { name: n });
+  $('#zonename').value = '';
 };
 
 // Start the pollers last, and catch what they return: an unhandled rejection

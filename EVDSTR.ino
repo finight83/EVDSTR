@@ -86,7 +86,8 @@
 // ---- Versioning ------------------------------------------------------------
 // Always update this field with latest patch updates
 #ifndef EVD_FW_VERSION
-#define EVD_FW_VERSION "1.0.0.0" 
+// 1.0.0.1: P2 - discovered nodes stay unassigned and muted until assigned.
+#define EVD_FW_VERSION "1.0.0.1"
 // EVDSTR: streaming side of the split server
 #endif
 #define FW_VERSION EVD_FW_VERSION
