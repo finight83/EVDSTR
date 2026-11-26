@@ -46,8 +46,19 @@ struct PeerInfo {
   int           priority;
   bool          leader;
   uint16_t      httpPort;
+  uint32_t      uptimeMs;
   unsigned long lastSeenMs;
 };
+
+// Equal priority goes to the server that has been up LONGEST (incumbent wins),
+// then to the lower id -- see the PC's enkelvoud/peers.py elect().
+inline bool peerOutranks(int prio, uint32_t uptime, const String &id,
+                         int bestPrio, uint32_t bestUptime,
+                         const String &bestId) {
+  if (prio != bestPrio) return prio < bestPrio;
+  if (uptime != bestUptime) return uptime > bestUptime;
+  return id < bestId;
+}
 
 static PeerInfo          g_peers[PEER_MAX];
 static int               g_peerCount = 0;
@@ -136,6 +147,7 @@ inline void peerHandlePacket(int sz) {
   const char *pname = doc["name"] | "";
   const char *pver  = doc["version"] | "";
   bool pledge = doc["leader"] | false;
+  uint32_t uptime = (uint32_t)(doc["uptimeMs"] | 0UL);
   IPAddress src = peerUdp.remoteIP();
   unsigned long now = millis();
 
@@ -155,6 +167,7 @@ inline void peerHandlePacket(int sz) {
   g_peers[slot].priority   = prio;
   g_peers[slot].leader     = pledge;
   g_peers[slot].httpPort   = port;
+  g_peers[slot].uptimeMs   = uptime;
   g_peers[slot].lastSeenMs = now;
   unlockFor(g_peerMutex);
 }
@@ -178,6 +191,7 @@ inline void peerEval() {
   bool wasLeader = g_peerIsLeader;
   String bestId   = g_selfPeerId;
   int    bestPrio = g_peerPriority;
+  uint32_t bestUptime = millis();
 
   if (lockFor(g_peerMutex, 20)) {
     for (int i = g_peerCount - 1; i >= 0; --i) {
@@ -188,11 +202,11 @@ inline void peerEval() {
     }
     for (int i = 0; i < g_peerCount; i++) {
       if ((unsigned long)(now - g_peers[i].lastSeenMs) > PEER_DEAD_MS) continue;
-      bool better = (g_peers[i].priority < bestPrio) ||
-                    (g_peers[i].priority == bestPrio && g_peers[i].id < bestId);
-      if (better) {
-        bestPrio = g_peers[i].priority;
-        bestId   = g_peers[i].id;
+      if (peerOutranks(g_peers[i].priority, g_peers[i].uptimeMs,
+                       g_peers[i].id, bestPrio, bestUptime, bestId)) {
+        bestPrio   = g_peers[i].priority;
+        bestUptime = g_peers[i].uptimeMs;
+        bestId     = g_peers[i].id;
       }
     }
     unlockFor(g_peerMutex);
@@ -220,12 +234,15 @@ inline void peerSetup() {
            (unsigned long long)(mac & 0xFFFFFFFFFFFFULL));
   g_selfPeerId = String(idbuf);
   peerLoadPriority();
-  g_peerIsLeader = true;
+  // [servers-decide] Start as a standby; the first peerTick promotes this
+  // board within ~1 s when it is alone (single-server mode still works).
+  g_peerIsLeader = false;
   if (peerUdp.begin(PEER_PORT)) {
     LOGI("peers: UDP %d, id %s, priority %d",
          PEER_PORT, g_selfPeerId.c_str(), g_peerPriority);
   } else {
     LOGW("peers: UDP %d bind failed; running as a single server", PEER_PORT);
+    g_peerIsLeader = true;
   }
   g_peerLastBeaconMs = 0;
 }
@@ -259,13 +276,14 @@ inline String peerBuildJson(bool wrap) {
 
   String bestId   = g_selfPeerId;
   int    bestPrio = g_peerPriority;
+  uint32_t bestUptime = millis();
   for (int i = 0; i < n; i++) {
     if ((unsigned long)(now - copy[i].lastSeenMs) > PEER_DEAD_MS) continue;
-    bool better = (copy[i].priority < bestPrio) ||
-                  (copy[i].priority == bestPrio && copy[i].id < bestId);
-    if (better) {
-      bestPrio = copy[i].priority;
-      bestId   = copy[i].id;
+    if (peerOutranks(copy[i].priority, copy[i].uptimeMs, copy[i].id,
+                     bestPrio, bestUptime, bestId)) {
+      bestPrio   = copy[i].priority;
+      bestUptime = copy[i].uptimeMs;
+      bestId     = copy[i].id;
     }
   }
 
@@ -298,7 +316,9 @@ inline String peerBuildJson(bool wrap) {
   }
 
   const char *role = g_peerIsLeader ? "leader" : "standby";
-  String f = "\"peerRole\":\"";
+  String f;
+  f.reserve(768);
+  f = "\"peerRole\":\"";
   f += role;
   f += "\",\"priority\":";
   f += String(g_peerPriority);

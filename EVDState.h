@@ -65,8 +65,10 @@ SemaphoreHandle_t ctrlMutex = nullptr;
 
 // ---- Multi-server election (P3: servers decide, see EVDSTRPeers.h) ---------
 // Read by udpSendTask, the discovery responder and the registration handler;
-// written by peerEval() from loop(). Single-server installs stay true.
-volatile bool g_peerIsLeader = true;
+// written by peerEval() from loop().
+// [servers-decide] Starts FALSE: a booting board is a standby until the first
+// election tick promotes it (single-server installs promote within ~1 s).
+volatile bool g_peerIsLeader = false;
 int           g_peerPriority = 2;   // 1 = highest; PC defaults to 1
 
 // ---- Statistics ------------------------------------------------------------
