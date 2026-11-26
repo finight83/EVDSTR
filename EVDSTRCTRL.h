@@ -45,6 +45,53 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
   #err{display:none;margin:0 22px 14px;padding:10px 12px;border-radius:10px;
        border:1px solid #5b1f1f;background:#1a0d0d;color:#ffb9b9;font-size:.85rem}
   #err.on{display:block}
+
+    /* ==================================================================
+       CLEAN THEME (palette pass) - matches the PC/server dashboards:
+       deep indigo base, hairline surfaces, pill controls.
+       ================================================================== */
+    :root {
+      --bg: #07070f;
+      --panel: rgba(255,255,255,0.055);
+      --line: rgba(255,255,255,0.10);
+      --text: #f4f5fb;
+      --muted: #b3b9d1;
+      --accent: #9db6ff;
+      --accenttext: #0b0a16;
+      --good: #4ade80;
+      --hair: rgba(255,255,255,0.10);
+      --hair-strong: rgba(255,255,255,0.16);
+    }
+    body { background-color: #07070f; color: var(--text); }
+    .card {
+      background: var(--panel) !important;
+      border: 1px solid var(--line) !important;
+      border-radius: 18px !important;
+      box-shadow: none !important;
+    }
+    .pill {
+      background: rgba(255,255,255,0.06) !important;
+      border: 1px solid var(--line) !important;
+      border-radius: 999px !important;
+    }
+    button, .btn, .tab {
+      border-radius: 999px !important;
+      border: 1px solid var(--line) !important;
+      background: rgba(255,255,255,0.06) !important;
+      color: var(--text) !important;
+      font-weight: 550 !important;
+    }
+    button:hover, .btn:hover, .tab:hover { background: rgba(255,255,255,0.12) !important; }
+    button.active, .tab.active, .btn.active {
+      background: rgba(255,255,255,0.16) !important; color: #fff !important;
+    }
+    input, select, textarea {
+      background: rgba(0,0,0,0.25) !important;
+      border: 1px solid var(--line) !important;
+      border-radius: 10px !important;
+      color: var(--text) !important;
+    }
+
 </style>
 </head>
 <body>
