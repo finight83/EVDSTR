@@ -165,12 +165,22 @@ inline void serviceDiscovery() {
     if (n > 0) {
       buf[n] = '\0';
       if (strncmp(buf, DISCOVERY_MAGIC_REQ, strlen(DISCOVERY_MAGIC_REQ)) == 0) {
-        String reply = String(DISCOVERY_MAGIC_RPY) + " role=str name=" +
-                       sanitizeServerName(serverName) + " ip=" +
-                       WiFi.localIP().toString() + " ctr=" + ctrHost;
-        discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
-        discoveryUdp.write((const uint8_t *)reply.c_str(), reply.length());
-        discoveryUdp.endPacket();
+        // [servers-decide] Only the elected leader answers node discovery.
+        // The paired controller is still answered so pairing and the status
+        // push keep working; while unpaired the board also answers so a fresh
+        // EVDCTR can find it at all (it cannot send audio or accept a
+        // registration as a standby, so nodes move on).
+        bool fromCtr = ctrHost.length() &&
+                       discoveryUdp.remoteIP().toString() == ctrHost;
+        bool shouldAnswer = g_peerIsLeader || !ctrHost.length() || fromCtr;
+        if (shouldAnswer) {
+          String reply = String(DISCOVERY_MAGIC_RPY) + " role=str name=" +
+                         sanitizeServerName(serverName) + " ip=" +
+                         WiFi.localIP().toString() + " ctr=" + ctrHost;
+          discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
+          discoveryUdp.write((const uint8_t *)reply.c_str(), reply.length());
+          discoveryUdp.endPacket();
+        }
       } else if (strncmp(buf, DISCOVERY_MAGIC_RPY, strlen(DISCOVERY_MAGIC_RPY)) == 0) {
         String role, host;
         if (discoveryField(buf, "role", role) && role == "ctr" &&

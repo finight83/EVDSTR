@@ -206,6 +206,8 @@ void setup() {
 
   Serial.printf("[STEP] discovery responder\n");
   setupDiscoveryResponder();
+  // [servers-decide] Peer beacons + election (EVDSTRPeers.h).
+  peerSetup();
   Serial.printf("[STEP] udp transport\n");
   setup_udp_transport();
   Serial.printf("[STEP] http server\n");
@@ -241,6 +243,7 @@ void setup() {
 void loop() {
   serviceFactoryResetPin();
   serviceDiscovery();
+  peerTick();   // [servers-decide] beacons + election, once per second
   serviceDeferredSettingsFlush();
 
   // Clock sync: a request/response exchange, NOT a poll.

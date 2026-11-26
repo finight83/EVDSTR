@@ -91,6 +91,19 @@ static const char EVDSTRCTRL_HTML[] PROGMEM = R"HTML(
         <button class="act" id="zoneadd" style="flex:0 0 auto;margin-top:0">Add room</button></div>
       <pre id="zones" style="margin-top:10px">-</pre></div>
   </div>
+
+  <div class="grid" style="margin-top:14px">
+    <div class="card" style="grid-column:1/-1"><h3>Servers (servers decide)</h3>
+      <div id="srv-role" class="muted" style="margin-bottom:8px">role …</div>
+      <div id="serverList" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div class="row" style="margin-top:10px">
+        <span class="muted" style="flex:0 0 auto">Priority (1 = highest)</span>
+        <input id="srv-priority" type="number" min="1" max="99" style="flex:0 0 auto;width:80px">
+        <button class="act" id="srv-apply" style="flex:0 0 auto;margin-top:0">Apply</button>
+        <span class="muted" id="srv-state" style="flex:0 0 auto"></span>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -104,6 +117,7 @@ const post = (url, body) => j(url, { method: 'POST',
   headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const kv = o => Object.entries(o)
   .map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v ?? '-'}</span></div>`).join('');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // Every command used to fire and forget: a refused pairing or a board that
 // restarted mid-request left the page unchanged and the operator guessing.
@@ -189,7 +203,70 @@ async function tick() {
     const pd = $('#p-disc');
     if (pd) { pd.textContent = disc + ' discovered'; pd.className = 'pill ' + (disc ? 'warn' : 'ok'); }
   }
+  if (s.servers) renderServers(s);
 }
+
+// ---- Servers (P3: servers decide) -------------------------------------------
+let serversData = [];
+function renderServers(s) {
+  serversData = s.servers || [];
+  const isLeader = s.peerRole === 'leader';
+  const leader = serversData.find(x => x.id === s.leaderId);
+  const roleEl = $('#srv-role');
+  if (roleEl) {
+    roleEl.innerHTML = '<span class="pill ' + (isLeader ? 'ok' : 'warn') + '">' +
+      (isLeader ? 'LEADER' : 'standby') + '</span> leader: ' +
+      esc(leader ? (leader.self ? 'this server' : (leader.name || leader.id)) : '?');
+  }
+  const prioEl = $('#srv-priority');
+  if (prioEl && document.activeElement !== prioEl) prioEl.value = s.priority;
+  const list = $('#serverList');
+  if (!list) return;
+  list.innerHTML = serversData.map((sv, i) => {
+    const down = sv.alive === false && !sv.self;
+    const badge = sv.id === s.leaderId ? '<span class="pill ok">leader</span>'
+                : (down ? '<span class="pill">down</span>' : '');
+    return '<div class="srv-row" draggable="true" data-id="' + esc(sv.id) + '"' +
+      ' ondragstart="srvDragStart(event)" ondragover="srvDragOver(event)"' +
+      ' ondragleave="srvDragLeave(event)" ondrop="srvDrop(event)" ondragend="srvDragEnd(event)"' +
+      ' style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:9px;' +
+      'background:rgba(255,255,255,.03);border:1px solid #32323c;cursor:grab;' +
+      (down ? 'opacity:.6;' : '') + '">' +
+      '<span class="muted" style="width:16px;text-align:right">' + (i + 1) + '</span>' +
+      '<strong>' + esc(sv.name || sv.id) + '</strong>' +
+      (sv.self ? '<span class="pill">this</span>' : '') +
+      '<span class="muted" style="font-size:.8rem">' + esc(sv.ip) + ' \u00b7 prio ' + sv.priority + '</span>' +
+      badge + '</div>';
+  }).join('') || '<p class="muted">no servers</p>';
+}
+let srvDragId = null;
+window.srvDragStart = e => { srvDragId = e.currentTarget.dataset.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', srvDragId); };
+window.srvDragOver = e => { e.preventDefault(); e.currentTarget.style.borderColor = 'var(--accent)'; };
+window.srvDragLeave = e => { e.currentTarget.style.borderColor = '#32323c'; };
+window.srvDragEnd = e => { e.currentTarget.style.borderColor = '#32323c'; };
+window.srvDrop = e => {
+  e.preventDefault(); e.currentTarget.style.borderColor = '#32323c';
+  const targetId = e.currentTarget.dataset.id;
+  const srcId = srvDragId || e.dataTransfer.getData('text/plain');
+  if (!srcId || srcId === targetId) return;
+  const order = serversData.map(x => x.id);
+  const from = order.indexOf(srcId), to = order.indexOf(targetId);
+  if (from < 0 || to < 0) return;
+  order.splice(from, 1); order.splice(to, 0, srcId);
+  $('#srv-state').textContent = 'applying\u2026';
+  post('/api/servers/order', { order }).then(r => {
+    $('#srv-state').textContent = (r && r.ok) ? 'order applied' : 'failed';
+    tick();
+  }).catch(e => err(e));
+};
+$('#srv-apply').onclick = () => {
+  const v = parseInt($('#srv-priority').value, 10);
+  if (!v) return;
+  post('/api/servers/priority', { priority: v }).then(r => {
+    $('#srv-state').textContent = (r && r.ok) ? ('priority ' + r.priority) : 'failed';
+    tick();
+  }).catch(e => err(e));
+};
 
 $('#vol').oninput = e => $('#volv').textContent = e.target.value;
 $('#vol').onchange = e => txt('/api/config', { masterVolume: +e.target.value });

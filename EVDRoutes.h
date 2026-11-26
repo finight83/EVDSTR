@@ -59,7 +59,12 @@ inline void handleApiState(AsyncWebServerRequest *request) {
   j += "\"heapFree\":" + String((unsigned long)ESP.getFreeHeap()) + ",";
   j += "\"heapMinFree\":" + String((unsigned long)ESP.getMinFreeHeap()) + ",";
   j += "\"ctr\":\"" + jsonEscape(ctrHost) + "\",";
-  j += "\"discoveryProbes\":" + String((unsigned long)statDiscoveryProbes) + "}";
+  j += "\"discoveryProbes\":" + String((unsigned long)statDiscoveryProbes);
+  // [servers-decide] Election state for the dashboard's Servers card.
+  // Published as "peerRole" because "role":"str" is the split-board role.
+  j += ",";
+  j += peerBuildJson(false);
+  j += "}";
   sendJson(request, j);
 }
 
@@ -319,6 +324,12 @@ inline void setup_http_server() {
 
   // ---- player API (must match EnkelvoudESPPlayer exactly) ----
   server.on("/api/player/register", HTTP_POST, [](AsyncWebServerRequest *) {}, nullptr, handlePlayerRegistration);
+
+  // ---- Servers (P3: servers decide) ---------------------------------------
+  server.on("/api/servers",          HTTP_GET,  handleApiServers);
+  server.on("/api/servers/priority", HTTP_POST, [](AsyncWebServerRequest *) {}, nullptr, handleApiServersPriority);
+  server.on("/api/servers/order",    HTTP_POST, [](AsyncWebServerRequest *) {}, nullptr, handleApiServersOrder);
+
   server.on("/api/node_stats",      HTTP_POST, [](AsyncWebServerRequest *) {}, nullptr, handleNodeStats);
   server.on("/api/player/ota_result", HTTP_POST, [](AsyncWebServerRequest *) {}, nullptr, handleOtaResult);
 

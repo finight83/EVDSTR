@@ -67,6 +67,16 @@ inline void udpSendTask(void *param) {
   static uint8_t hdr[AUDIO_HEADER_BYTES];
 
   for (;;) {
+    // [servers-decide] A standby sends no audio: drain the queue (so the link
+    // producer never backs up) and drop the frames until the election makes
+    // this board the leader again.
+    if (!g_peerIsLeader) {
+      if (xQueueReceive(opusQueue, &pkt, pdMS_TO_TICKS(20)) == pdTRUE) {
+        statOpusDropped++;
+        statFramesDroppedTotal++;
+      }
+      continue;
+    }
     if (xQueueReceive(opusQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
 
     // Seed or re-anchor the schedule only on a real gap, never on lateness.

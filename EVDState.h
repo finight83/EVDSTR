@@ -63,6 +63,12 @@ WiFiUDP clockSyncUdp;
 WiFiUDP discoveryUdp;
 SemaphoreHandle_t ctrlMutex = nullptr;
 
+// ---- Multi-server election (P3: servers decide, see EVDSTRPeers.h) ---------
+// Read by udpSendTask, the discovery responder and the registration handler;
+// written by peerEval() from loop(). Single-server installs stay true.
+volatile bool g_peerIsLeader = true;
+int           g_peerPriority = 2;   // 1 = highest; PC defaults to 1
+
 // ---- Statistics ------------------------------------------------------------
 uint32_t statOpusEncoded   = 0;   // frames queued from the link
 uint32_t statOpusDropped   = 0;   // queue full / link stale

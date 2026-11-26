@@ -86,8 +86,12 @@
 // ---- Versioning ------------------------------------------------------------
 // Always update this field with latest patch updates
 #ifndef EVD_FW_VERSION
+// 1.1.0.0: P3 - multi-server peer beacons + "servers decide" election on UDP
+//          :4205. Only the leader answers node discovery (the paired
+//          controller is still answered), accepts registrations and sends
+//          audio; /api/servers* expose and set priority.
 // 1.0.0.1: P2 - discovered nodes stay unassigned and muted until assigned.
-#define EVD_FW_VERSION "1.0.0.1"
+#define EVD_FW_VERSION "1.1.0.0"
 // EVDSTR: streaming side of the split server
 #endif
 #define FW_VERSION EVD_FW_VERSION
@@ -282,6 +286,7 @@ inline void pollNodeStats();
 #include "EVDUDP.h"
 #include "EVDAudio.h"
 #include "EVDPlayers.h"
+#include "EVDSTRPeers.h"   // [servers-decide] peer beacons + election
 #include "EVDOTA.h"     // route handlers EVDRoutes.h registers
 #include "EVDRoutes.h"
 #include "EVDMain.h"
